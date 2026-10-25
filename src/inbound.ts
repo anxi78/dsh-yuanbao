@@ -46,6 +46,23 @@ export async function handleInbound(params: {
 
   const msgBody = msg.msg_body ?? [];
   const extracted = extractText(msgBody);
+
+  // ── 先记录本条消息的媒体 ──
+  // 关键：必须放在 @bot 检查**之前**。
+  // 元宝里图片消息不能 @bot，所以用户先发图（没 @bot）→ 会被下面的
+  // requireMention 直接 return 掉。如果把记录放在后面，那张图就永远
+  // 进不了历史，之后引用它时只能降级成 [image] 占位。
+  const chatKey = deriveChatKey(isGroup, msg.group_code, msg.from_account);
+  const ownMedias = extractMedias(msgBody);
+  if (ownMedias.length > 0) {
+    rememberMedia(chatKey, {
+      sender: msg.sender_nickname ?? msg.from_account ?? 'unknown',
+      messageId: msg.msg_id,
+      medias: ownMedias,
+    });
+    logger.info(`inbound media remembered: count=${ownMedias.length}; chatKey=${chatKey}; msgId=${msg.msg_id ?? ''}`);
+  }
+
   // Prefer the explicitly configured botId; otherwise fall back to the id
   // resolved during the sign-token exchange, which is the authoritative
   // identity for deciding whether this bot was @mentioned.
@@ -70,21 +87,10 @@ export async function handleInbound(params: {
   // 元宝里要 @bot 必须是文字消息，所以用户想让我看图时，
   // 实际发的是「引用那条图片 + @我 + 一句文字」。
   // 引用信息在消息级的 cloud_custom_data 里，不在 msg_body。
-  const chatKey = deriveChatKey(isGroup, msg.group_code, msg.from_account);
   const quote = parseQuote(msg.cloud_custom_data);
   const quoteMedia = quote ? resolveQuoteMedia(quote, chatKey) : undefined;
   if (quote) {
     logger.info(`inbound quote detected: type=${quote.type ?? '?'}; hasDesc=${Boolean(quote.desc)}; id=${quote.id ?? ''}; mediaResolved=${quoteMedia ? 'yes' : 'no'}`);
-  }
-
-  // 把本条消息携带的媒体记进历史，供后续引用回查
-  const ownMedias = extractMedias(msgBody);
-  if (ownMedias.length > 0) {
-    rememberMedia(chatKey, {
-      sender: msg.sender_nickname ?? msg.from_account ?? 'unknown',
-      messageId: msg.msg_id,
-      medias: ownMedias,
-    });
   }
 
   const replyTarget: ReplyTarget = {
