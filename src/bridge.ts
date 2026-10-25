@@ -115,10 +115,20 @@ export class YuanbaoDshBridge {
    */
   private attachmentStore(): AttachmentStoreLike | undefined {
     const store = this.services.get('attachments') as AttachmentStoreLike | undefined;
-    if (store && typeof store.saveImage === 'function' && typeof store.saveFile === 'function') {
-      return store;
+
+    // 诊断：附件服务到底能不能取到。
+    // 取不到时媒体功能整体降级（只发文字），所以要能一眼看出原因。
+    if (!store) {
+      this.logger.warn('attachment store missing: service "attachments" not resolvable');
+      return undefined;
     }
-    return undefined;
+    const hasSaveImage = typeof (store as { saveImage?: unknown }).saveImage === 'function';
+    const hasSaveFile = typeof (store as { saveFile?: unknown }).saveFile === 'function';
+    if (!hasSaveImage || !hasSaveFile) {
+      this.logger.warn(`attachment store incomplete: saveImage=${hasSaveImage}; saveFile=${hasSaveFile}; keys=${Object.keys(store as object).join(',')}`);
+      return undefined;
+    }
+    return store;
   }
 }
 
