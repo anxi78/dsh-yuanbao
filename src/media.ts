@@ -178,6 +178,10 @@ export async function buildMediaBlocks(params: {
   }
   const medias = extractMedias(body);
   const blocks: ContentBlock[] = [];
+  logger.info(`buildMediaBlocks: extracted=${medias.length}; bodyLen=${body.length}`);
+  for (const m of medias) {
+    logger.info(`buildMediaBlocks: media kind=${m.kind}; url=${m.url.slice(0, 120)}; name=${m.name}`);
+  }
 
   for (const media of medias) {
     const downloaded = await downloadMedia(media, logger);
