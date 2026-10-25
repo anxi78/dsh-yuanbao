@@ -12,7 +12,7 @@ import type { SessionManager } from './session/manager.js';
 import type { YuanbaoSender } from './transport/sender.js';
 import { createReplyHeartbeatController } from './transport/heartbeat.js';
 import { handleBuiltinCommand } from './commands.js';
-import { buildMediaBlocks, extractMedias, type InboundMedia } from './media.js';
+import { buildMediaBlocks, downloadMedia, extractMedias, guessImageMediaType, IMAGE_MEDIA_TYPES, type InboundMedia } from './media.js';
 import { formatQuoteContext, parseQuote, resolveQuoteMedia, type QuoteInfo } from './quote.js';
 import { deriveChatKey, rememberMedia } from './chat-history.js';
 import type { AttachmentStoreLike } from './media.js';
@@ -152,22 +152,36 @@ export async function handleInbound(params: {
     let mediaBlocks = await buildMediaBlocks({ body: msgBody, attachments, logger });
     logger.info(`inbound media diag: ownBlocks=${mediaBlocks.length}`);
     // 引用的图片/文件也要附上，否则 agent 只看到「[引用消息]」却看不到内容
-    if (quoteMedia) {
+    //
+    // 注意：这里不能走 buildMediaBlocks。
+    // 那个函数靠 extractMedias 解析消息体，而图片的 URL 只从
+    // msg_content.image_info_array 里读 —— 构造一个只有 msg_content.url
+    // 的伪元素是匹配不上的（实测 extracted=0）。
+    // 引用媒体已经有现成的 url 和 name，直接下载 + 存进附件库即可。
+    if (quoteMedia && attachments) {
       try {
-        const quoteBlocks = await buildMediaBlocks({
-          body: [{
-            msg_type: quoteMedia.kind === 'image' ? 'TIMImageElem' : 'TIMFileElem',
-            msg_content: {
-              url: quoteMedia.url,
-              file_name: quoteMedia.name,
-            },
-          }],
-          attachments,
-          logger,
-        });
-        if (quoteBlocks.length > 0) {
-          mediaBlocks = mediaBlocks.concat(quoteBlocks);
-          logger.info(`inbound quoted media attached: kind=${quoteMedia.kind}; name=${quoteMedia.name}`);
+        const downloaded = await downloadMedia(quoteMedia, logger);
+        if (downloaded) {
+          const guessed = quoteMedia.kind === 'image' ? guessImageMediaType(quoteMedia.name) : undefined;
+          const mediaType = guessed ?? downloaded.mediaType;
+          if (quoteMedia.kind === 'image' && mediaType && IMAGE_MEDIA_TYPES.has(mediaType)) {
+            const ref = await attachments.saveImage({
+              data: downloaded.data,
+              mediaType,
+              name: quoteMedia.name,
+            });
+            mediaBlocks = mediaBlocks.concat([{ type: 'image', attachment: ref } as unknown as ContentBlock]);
+            logger.info(`inbound quoted media attached as image: name=${quoteMedia.name}; bytes=${downloaded.data.byteLength}`);
+          } else {
+            const ref = await attachments.saveFile({
+              data: downloaded.data,
+              name: quoteMedia.name,
+            });
+            mediaBlocks = mediaBlocks.concat([{ type: 'file', attachment: ref } as unknown as ContentBlock]);
+            logger.info(`inbound quoted media attached as file: name=${quoteMedia.name}; bytes=${downloaded.data.byteLength}`);
+          }
+        } else {
+          logger.warn(`inbound quoted media download failed: name=${quoteMedia.name}; url=${quoteMedia.url.slice(0, 100)}`);
         }
       } catch (error) {
         logger.warn(`inbound quoted media attach failed: ${error instanceof Error ? error.message : String(error)}`);

@@ -3,7 +3,7 @@ import type { YuanbaoMsgBodyElement } from './types.js';
 import type { Logger } from './types.js';
 
 /** Image media types accepted by the DSH attachment store. */
-const IMAGE_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+export const IMAGE_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
 
 /** Extension -> media type, used when the payload does not declare one. */
 const EXT_TO_MEDIA: Record<string, string> = {
