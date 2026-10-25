@@ -13,13 +13,72 @@ export const name = 'dsh-yuanbao';
 export const inject = ['agents', 'sessionPersistence', 'agentDefaultModel', 'tools', 'webServer'];
 export const Config = ConfigSchema;
 
+/**
+ * 设置持久化
+ * ===========
+ * 设置面板改的东西只写内存的话，DSH 一重启就全丢了。
+ * 这里存到 ~/.dsh/.yuanbao-settings.json，启动时读回来覆盖配置默认值。
+ *
+ * 为什么不用 cordis.patch.yml：
+ *   那是静态配置，用户改一次要手写 YAML 再重启，体验太差。
+ *   运行时设置放独立文件，互不干扰。
+ */
+const SETTINGS_FILE = '.yuanbao-settings.json';
+
+type PersistedSettings = {
+  sessionMode?: 'per-peer' | 'pinned';
+  pinnedSessionId?: string;
+};
+
+function settingsPath(): string {
+  // 跟随 DSH 家目录，默认 ~/.dsh
+  const home = process.env.DSH_HOME
+    || (process.env.HOME ? `${process.env.HOME}/.dsh` : '');
+  if (!home) return '';
+  return `${home}/${SETTINGS_FILE}`;
+}
+
+async function readPersistedSettings(): Promise<PersistedSettings> {
+  const file = settingsPath();
+  if (!file) return {};
+  try {
+    const { readFile } = await import('node:fs/promises');
+    const raw = await readFile(file, 'utf8');
+    const parsed = JSON.parse(raw) as PersistedSettings;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    // 文件不存在或损坏都不影响启动，回退到配置默认值
+    return {};
+  }
+}
+
+async function writePersistedSettings(next: PersistedSettings): Promise<void> {
+  const file = settingsPath();
+  if (!file) throw new Error('DSH_HOME / HOME 都未设置，无法定位设置文件');
+  const { writeFile, mkdir } = await import('node:fs/promises');
+  const { dirname } = await import('node:path');
+  await mkdir(dirname(file), { recursive: true });
+  await writeFile(file, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
+}
+
 export async function apply(ctx: Context, config: YuanbaoDshConfig): Promise<void> {
   const services = createServiceReader(ctx);
   const rootSink = services.get('logger') as Partial<Logger> | undefined;
   const logger = createLog('main', rootSink);
   const loadedEnvFiles = loadLocalEnv();
   const resolvedConfig = resolveEnvConfig(config);
-  logger.info(`apply() called; envFiles=${loadedEnvFiles.length}; appKey=${resolvedConfig.appKey ? 'set' : 'missing'}; secret=${resolvedConfig.appSecret ? 'set' : 'missing'}; token=${resolvedConfig.token ? 'set' : 'missing'}`);
+
+  // 读回上次在设置面板里保存的选项，覆盖配置文件的默认值。
+  // 这样重启 DSH 之后不需要重新设置一遍。
+  const persisted = await readPersistedSettings();
+  if (persisted.sessionMode === 'per-peer' || persisted.sessionMode === 'pinned') {
+    resolvedConfig.sessionMode = persisted.sessionMode;
+  }
+  if (typeof persisted.pinnedSessionId === 'string') {
+    resolvedConfig.pinnedSessionId = persisted.pinnedSessionId;
+  }
+
+  logger.info(`apply() called; envFiles=${loadedEnvFiles.length}; appKey=${resolvedConfig.appKey ? 'set' : 'missing'}; secret=${resolvedConfig.appSecret ? 'set' : 'missing'}; token=${resolvedConfig.token ? 'set' : 'missing'}; sessionMode=${resolvedConfig.sessionMode ?? 'per-peer'}; pinned=${resolvedConfig.pinnedSessionId || '(none)'}`);
 
   const agents = services.require('agents') as DshAgentRegistry | undefined;
   if (!agents) {
@@ -94,6 +153,19 @@ export async function apply(ctx: Context, config: YuanbaoDshConfig): Promise<voi
             // 下一次 getOrCreate 就会按新模式算 key，不需要重启插件。
             if (mode !== undefined) resolvedConfig.sessionMode = mode;
             if (typeof pinned === 'string') resolvedConfig.pinnedSessionId = pinned.trim();
+
+            // 同时写盘：不然 DSH 一重启，面板里改的东西就没了。
+            try {
+              await writePersistedSettings({
+                sessionMode: resolvedConfig.sessionMode,
+                pinnedSessionId: resolvedConfig.pinnedSessionId ?? '',
+              });
+              logger.info(`session routing persisted: mode=${resolvedConfig.sessionMode}; pinned=${resolvedConfig.pinnedSessionId || '(none)'}`);
+            } catch (persistError) {
+              // 写盘失败不影响本次生效，但要留痕 —— 否则用户会以为保存成功了
+              logger.warn(`session routing persist failed: ${persistError instanceof Error ? persistError.message : String(persistError)}`);
+            }
+
             logger.info(
               `session routing updated: mode=${resolvedConfig.sessionMode}; pinned=${resolvedConfig.pinnedSessionId || '(none)'}`,
             );
