@@ -1,7 +1,7 @@
 {
-  "name": "dsh-yuanbao",
-  "version": "0.1.3",
-  "description": "Yuanbao IM channel plugin for deepseek-harness (dsh)",
+  "name": "@anxi78/dsh-yuanbao",
+  "version": "0.2.0",
+  "description": "Yuanbao IM channel plugin for deepseek-harness (dsh) — Anxi 定制分支：引用消息、媒体附件、Agent 工具、设置面板",
   "type": "module",
   "packageManager": "pnpm@10.33.2",
   "main": "./dist/index.js",
@@ -31,7 +31,12 @@
   "keywords": [
     "deepseek-harness",
     "dsh",
+    "dsh-plugin",
     "yuanbao",
+    "tencent",
+    "im",
+    "chatbot",
+    "channel",
     "cordis",
     "plugin"
   ],
@@ -69,5 +74,17 @@
     "@types/node": "^26.2.0",
     "@types/ws": "^8.18.1",
     "typescript": "^5.5.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anxi78/dsh-yuanbao.git"
+  },
+  "homepage": "https://github.com/anxi78/dsh-yuanbao#readme",
+  "bugs": {
+    "url": "https://github.com/anxi78/dsh-yuanbao/issues"
+  },
+  "author": "anxi78",
+  "publishConfig": {
+    "access": "public"
   }
 }

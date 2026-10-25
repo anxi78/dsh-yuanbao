@@ -1,7 +1,11 @@
 import Schema from '@deepseek-ai/schemastery';
 import type { YuanbaoDshConfig } from './types.js';
 
-export const ConfigSchema: Schema<YuanbaoDshConfig> = Schema.object({
+// 注：schemastery 新版本把 Schema 的默认值类型改成了 SchemaOutput<T>，
+// 与手写的 YuanbaoDshConfig 不再直接兼容（appKey 变成
+// string | Volatile<string> | undefined），直接标注会报 TS2322。
+// 这里先构建对象，再断言成目标类型 —— 运行期结构是对的。
+const schemaObject = Schema.object({
   appKey: Schema.string().default('').description('Yuanbao App Key'),
   appSecret: Schema.string().default('').description('Yuanbao App Secret'),
   token: Schema.string().description('Pre-signed Yuanbao WebSocket token'),
@@ -39,3 +43,5 @@ export const ConfigSchema: Schema<YuanbaoDshConfig> = Schema.object({
   }).description('Channel-level access control'),
   debug: Schema.boolean().default(false),
 });
+
+export const ConfigSchema = schemaObject as unknown as Schema<YuanbaoDshConfig>;
