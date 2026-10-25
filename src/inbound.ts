@@ -53,6 +53,30 @@ export async function handleInbound(params: {
   // requireMention 直接 return 掉。如果把记录放在后面，那张图就永远
   // 进不了历史，之后引用它时只能降级成 [image] 占位。
   const chatKey = deriveChatKey(isGroup, msg.group_code, msg.from_account);
+
+  // ── 诊断：把收到的消息体结构打出来 ──
+  // 图片引用拿不到 URL 时，靠这段日志判断是「图片消息没收到」
+  // 还是「收到了但 image_info_array 里没有 url」。
+  try {
+    const shape = msgBody.map((e) => {
+      const c = e.msg_content ?? {};
+      const info = Array.isArray(c.image_info_array) ? c.image_info_array : [];
+      return {
+        type: e.msg_type,
+        hasText: Boolean(c.text),
+        hasData: Boolean(c.data),
+        hasUrl: Boolean(c.url),
+        uuid: c.uuid ? String(c.uuid).slice(0, 20) : '',
+        imgInfoCount: info.length,
+        imgInfoUrls: info.map((x) => (x && typeof x.url === 'string' ? x.url.slice(0, 60) : '')),
+        keys: Object.keys(c).slice(0, 12),
+      };
+    });
+    logger.info(`inbound body shape: ${JSON.stringify(shape)}`);
+  } catch (e) {
+    logger.warn(`inbound body shape dump failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
   const ownMedias = extractMedias(msgBody);
   if (ownMedias.length > 0) {
     rememberMedia(chatKey, {
