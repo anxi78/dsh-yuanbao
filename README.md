@@ -4,6 +4,8 @@
 
 基于 [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) (dsh) 的元宝 IM 通道插件，将元宝开放平台 WebSocket 消息接入 dsh agent runtime。
 
+npm: [`@anxi78/dsh-yuanbao`](https://www.npmjs.com/package/@anxi78/dsh-yuanbao)
+
 > **⚠️ 本仓库是定制分支**
 >
 > 上游：[YuanbaoTeam/dsh-yuanbao](https://github.com/YuanbaoTeam/dsh-yuanbao)
@@ -197,14 +199,14 @@ git merge upstream/main
 
 ## 安装
 
-### 方式一：从 npm registry 安装
+### 方式一：从 npm registry 安装（推荐）
 
 ```bash
-# 安装到独立 profile
-dsh plugin --profile yuanbao add dsh-yuanbao
+# 安装到 web profile
+dsh plugin --profile web add @anxi78/dsh-yuanbao
 
 # 启动
-dsh --profile yuanbao
+dsh --profile web
 ```
 
 ### 方式二：本地路径安装
@@ -215,19 +217,11 @@ cd /path/to/dsh-yuanbao
 pnpm install
 pnpm build
 
-# 安装到 deepseek-harness profile
-cd /path/to/deepseek-harness
-pnpm dsh plugin --profile yuanbao add /path/to/dsh-yuanbao
+# 安装到 web profile
+dsh plugin --profile web add /path/to/dsh-yuanbao
 
 # 启动
-pnpm dsh --profile yuanbao
-```
-
-如果需要和 Web UI 一起使用，也可以安装到 `web` profile：
-
-```bash
-pnpm dsh plugin --profile web add /path/to/dsh-yuanbao
-pnpm dsh --profile web
+dsh --profile web
 ```
 
 ## 环境变量
@@ -372,7 +366,7 @@ agent-default-model:
 ```yaml
 - insert:
     - id: dsh-yuanbao
-      name: 'dsh-yuanbao'
+      name: '@anxi78/dsh-yuanbao'
       config:
         provider: openai
         model: gpt-4o-mini
@@ -413,7 +407,7 @@ agent-default-model:
 ```yaml
 - insert:
     - id: dsh-yuanbao
-      name: 'dsh-yuanbao'
+      name: '@anxi78/dsh-yuanbao'
       config:
         appKey: !!js process.env.YUANBAO_APP_KEY ?? ''
         appSecret: !!js process.env.YUANBAO_APP_SECRET ?? ''
@@ -519,10 +513,9 @@ pnpm build
 # watch
 pnpm dev
 
-# 本地安装到 dsh profile
-cd /path/to/deepseek-harness
-pnpm dsh plugin --profile yuanbao add /path/to/dsh-yuanbao
-pnpm dsh --profile yuanbao
+# 本地安装到 web profile
+dsh plugin --profile web add /path/to/dsh-yuanbao
+dsh --profile web
 ```
 
 ## License

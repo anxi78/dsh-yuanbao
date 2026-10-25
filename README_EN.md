@@ -21,14 +21,14 @@ Yuanbao User → Yuanbao WebSocket Gateway → dsh-yuanbao → ctx.agents → ds
 
 ## Installation
 
-### Option 1: Install from npm registry
+### Option 1: Install from npm registry (recommended)
 
 ```bash
-# Install into an independent profile
-dsh plugin --profile yuanbao add dsh-yuanbao
+# Install into the web profile
+dsh plugin --profile web add @anxi78/dsh-yuanbao
 
 # Start
-dsh --profile yuanbao
+dsh --profile web
 ```
 
 ### Option 2: Install from local path
@@ -39,15 +39,14 @@ cd /path/to/dsh-yuanbao
 pnpm install
 pnpm build
 
-# Install into a deepseek-harness profile
-cd /path/to/deepseek-harness
-pnpm dsh plugin --profile yuanbao add /path/to/dsh-yuanbao
+# Install into the web profile
+dsh plugin --profile web add /path/to/dsh-yuanbao
 
 # Start
-pnpm dsh --profile yuanbao
+dsh --profile web
 ```
 
-To run together with the Web UI, install it into the `web` profile:
+The `web` profile is the one used together with the Web UI:
 
 ```bash
 pnpm dsh plugin --profile web add /path/to/dsh-yuanbao
@@ -196,7 +195,7 @@ You can also explicitly set the model in `cordis.patch.yml` for `dsh-yuanbao`, o
 ```yaml
 - insert:
     - id: dsh-yuanbao
-      name: 'dsh-yuanbao'
+      name: '@anxi78/dsh-yuanbao'
       config:
         provider: openai
         model: gpt-4o-mini
@@ -235,7 +234,7 @@ Default bundle patch:
 ```yaml
 - insert:
     - id: dsh-yuanbao
-      name: 'dsh-yuanbao'
+      name: '@anxi78/dsh-yuanbao'
       config:
         appKey: !!js process.env.YUANBAO_APP_KEY ?? ''
         appSecret: !!js process.env.YUANBAO_APP_SECRET ?? ''
