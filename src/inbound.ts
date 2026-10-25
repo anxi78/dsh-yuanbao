@@ -13,6 +13,8 @@ import type { YuanbaoSender } from './transport/sender.js';
 import { createReplyHeartbeatController } from './transport/heartbeat.js';
 import { handleBuiltinCommand } from './commands.js';
 import { buildMediaBlocks, extractMedias } from './media.js';
+import { formatQuoteContext, parseQuote, resolveQuoteMedia, type QuoteInfo } from './quote.js';
+import { deriveChatKey, rememberMedia } from './chat-history.js';
 import type { AttachmentStoreLike } from './media.js';
 
 export async function handleInbound(params: {
@@ -63,6 +65,28 @@ export async function handleInbound(params: {
   }
 
   const text = stripMention(extracted, botIdentity).trim();
+
+  // ── 引用消息 ──
+  // 元宝里要 @bot 必须是文字消息，所以用户想让我看图时，
+  // 实际发的是「引用那条图片 + @我 + 一句文字」。
+  // 引用信息在消息级的 cloud_custom_data 里，不在 msg_body。
+  const chatKey = deriveChatKey(isGroup, msg.group_code, msg.from_account);
+  const quote = parseQuote(msg.cloud_custom_data);
+  const quoteMedia = quote ? resolveQuoteMedia(quote, chatKey) : undefined;
+  if (quote) {
+    logger.info(`inbound quote detected: type=${quote.type ?? '?'}; hasDesc=${Boolean(quote.desc)}; id=${quote.id ?? ''}; mediaResolved=${quoteMedia ? 'yes' : 'no'}`);
+  }
+
+  // 把本条消息携带的媒体记进历史，供后续引用回查
+  const ownMedias = extractMedias(msgBody);
+  if (ownMedias.length > 0) {
+    rememberMedia(chatKey, {
+      sender: msg.sender_nickname ?? msg.from_account ?? 'unknown',
+      messageId: msg.msg_id,
+      medias: ownMedias,
+    });
+  }
+
   const replyTarget: ReplyTarget = {
     scope,
     targetId: peerId,
@@ -78,7 +102,7 @@ export async function handleInbound(params: {
     return;
   }
 
-  const body = buildAgentBody({ msg, text, scope, mentioned, config });
+  const body = buildAgentBody({ msg, text, scope, mentioned, config, quote });
   if (!body.trim()) {
     logger.warn('inbound dropped: empty agent body');
     return;
@@ -90,7 +114,29 @@ export async function handleInbound(params: {
     const content: ContentBlock[] = [{ type: 'text', text: body }];
     // Attach images/files so the agent can actually inspect them. Failures are
     // logged and skipped: losing media must not lose the accompanying text.
-    const mediaBlocks = await buildMediaBlocks({ body: msgBody, attachments, logger });
+    let mediaBlocks = await buildMediaBlocks({ body: msgBody, attachments, logger });
+    // 引用的图片/文件也要附上，否则 agent 只看到「[引用消息]」却看不到内容
+    if (quoteMedia) {
+      try {
+        const quoteBlocks = await buildMediaBlocks({
+          body: [{
+            msg_type: quoteMedia.kind === 'image' ? 'TIMImageElem' : 'TIMFileElem',
+            msg_content: {
+              url: quoteMedia.url,
+              file_name: quoteMedia.name,
+            },
+          }],
+          attachments,
+          logger,
+        });
+        if (quoteBlocks.length > 0) {
+          mediaBlocks = mediaBlocks.concat(quoteBlocks);
+          logger.info(`inbound quoted media attached: kind=${quoteMedia.kind}; name=${quoteMedia.name}`);
+        }
+      } catch (error) {
+        logger.warn(`inbound quoted media attach failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     if (mediaBlocks.length > 0) {
       content.push(...mediaBlocks);
       logger.info(`inbound media attached: count=${mediaBlocks.length}; scope=${scope}; peer=${peerId}`);
@@ -220,8 +266,10 @@ function buildAgentBody(params: {
   scope: ChatScope;
   mentioned: boolean;
   config: YuanbaoDshConfig;
+  /** 被引用的消息；有值时会把内容作为上下文附在正文前 */
+  quote?: QuoteInfo;
 }): string {
-  const { msg, text, scope, mentioned, config } = params;
+  const { msg, text, scope, mentioned, config, quote } = params;
   const prompt = scope === 'group' ? config.groupPrompt : config.directPrompt;
   const header = scope === 'group'
     ? `[Yuanbao group message from ${msg.sender_nickname ?? msg.from_account ?? 'unknown'} in group ${msg.group_name ?? msg.group_code ?? 'unknown'}${mentioned ? ', mentioned bot' : ''}]`
@@ -230,5 +278,11 @@ function buildAgentBody(params: {
     msg.msg_id ? `message_id: ${msg.msg_id}` : '',
     msg.trace_id ? `trace_id: ${msg.trace_id}` : '',
   ].filter(Boolean).join('\n');
-  return [prompt, header, metadata ? `<metadata>\n${metadata}\n</metadata>` : '', text].filter(Boolean).join('\n\n');
+
+  // 引用内容放在正文之前，让 agent 先看到"他在回复哪条消息"
+  const quoteBlock = quote ? formatQuoteContext(quote) : '';
+
+  return [prompt, header, metadata ? `<metadata>\n${metadata}\n</metadata>` : '', quoteBlock, text]
+    .filter(Boolean)
+    .join('\n\n');
 }
