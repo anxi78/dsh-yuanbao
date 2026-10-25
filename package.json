@@ -1,6 +1,6 @@
 {
   "name": "@anxi78/dsh-yuanbao",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Yuanbao IM channel plugin for deepseek-harness (dsh) — Anxi 定制分支：引用消息、媒体附件、Agent 工具、设置面板",
   "type": "module",
   "packageManager": "pnpm@10.33.2",

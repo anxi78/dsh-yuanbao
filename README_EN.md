@@ -325,10 +325,9 @@ pnpm build
 # Watch
 pnpm dev
 
-# Install locally into a dsh profile
-cd /path/to/deepseek-harness
-pnpm dsh plugin --profile yuanbao add /path/to/dsh-yuanbao
-pnpm dsh --profile yuanbao
+# Install locally into the web profile
+dsh plugin --profile web add /path/to/dsh-yuanbao
+dsh --profile web
 ```
 
 ## License
