@@ -129,17 +129,26 @@ export function resolveQuoteMedia(
  *   > [引用 @某人 的消息]:
  *   >[image]
  */
-export function formatQuoteContext(quote: QuoteInfo): string {
+export function formatQuoteContext(quote: QuoteInfo, media?: InboundMedia): string {
   let senderPart = '';
   if (quote.sender_nickname) senderPart = ` from ${quote.sender_nickname}`;
   else if (quote.sender_id) senderPart = ` from ${quote.sender_id}`;
 
   let desc = quote.desc?.trim() || '';
+
   if (!desc) {
-    const type = Number(quote.type);
-    const label = TYPE_LABEL[type] ?? 'media';
-    desc = `[${label}]`;
+    // 媒体引用：desc 本来就是空的。
+    // 如果已经按 id 回查到实体，就用真实文件名 —— 否则退回 [image] 这种标签。
+    // （之前只判断 desc，所以即使媒体解析成功，这里仍然只输出 [image]。）
+    if (media) {
+      desc = media.placeholder;
+    } else {
+      const type = Number(quote.type);
+      const label = TYPE_LABEL[type] ?? 'media';
+      desc = `[${label}]`;
+    }
   }
+
   if (desc.length > QUOTE_DESC_MAX_LENGTH) {
     desc = `${desc.slice(0, QUOTE_DESC_MAX_LENGTH)}...(truncated)`;
   }

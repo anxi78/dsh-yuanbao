@@ -12,7 +12,7 @@ import type { SessionManager } from './session/manager.js';
 import type { YuanbaoSender } from './transport/sender.js';
 import { createReplyHeartbeatController } from './transport/heartbeat.js';
 import { handleBuiltinCommand } from './commands.js';
-import { buildMediaBlocks, extractMedias } from './media.js';
+import { buildMediaBlocks, extractMedias, type InboundMedia } from './media.js';
 import { formatQuoteContext, parseQuote, resolveQuoteMedia, type QuoteInfo } from './quote.js';
 import { deriveChatKey, rememberMedia } from './chat-history.js';
 import type { AttachmentStoreLike } from './media.js';
@@ -132,7 +132,7 @@ export async function handleInbound(params: {
     return;
   }
 
-  const body = buildAgentBody({ msg, text, scope, mentioned, config, quote });
+  const body = buildAgentBody({ msg, text, scope, mentioned, config, quote, quoteMedia });
   if (!body.trim()) {
     logger.warn('inbound dropped: empty agent body');
     return;
@@ -298,8 +298,10 @@ function buildAgentBody(params: {
   config: YuanbaoDshConfig;
   /** 被引用的消息；有值时会把内容作为上下文附在正文前 */
   quote?: QuoteInfo;
+  /** 引用里回查到的媒体实体（图片/文件） */
+  quoteMedia?: InboundMedia;
 }): string {
-  const { msg, text, scope, mentioned, config, quote } = params;
+  const { msg, text, scope, mentioned, config, quote, quoteMedia } = params;
   const prompt = scope === 'group' ? config.groupPrompt : config.directPrompt;
   const header = scope === 'group'
     ? `[Yuanbao group message from ${msg.sender_nickname ?? msg.from_account ?? 'unknown'} in group ${msg.group_name ?? msg.group_code ?? 'unknown'}${mentioned ? ', mentioned bot' : ''}]`
@@ -310,7 +312,7 @@ function buildAgentBody(params: {
   ].filter(Boolean).join('\n');
 
   // 引用内容放在正文之前，让 agent 先看到"他在回复哪条消息"
-  const quoteBlock = quote ? formatQuoteContext(quote) : '';
+  const quoteBlock = quote ? formatQuoteContext(quote, quoteMedia) : '';
 
   return [prompt, header, metadata ? `<metadata>\n${metadata}\n</metadata>` : '', quoteBlock, text]
     .filter(Boolean)
