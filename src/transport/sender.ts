@@ -295,10 +295,33 @@ export class YuanbaoSender {
         this.logger.warn(`resolveDownloadUrl: exchange failed; status=${response.status}`);
         return undefined;
       }
-      const body = (await response.json()) as { data?: { url?: string; realUrl?: string } };
-      const url = body?.data?.url ?? body?.data?.realUrl;
+      const raw = await response.text();
+      let body: unknown;
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        this.logger.warn(`resolveDownloadUrl: non-JSON response; preview=${raw.slice(0, 200)}`);
+        return undefined;
+      }
+
+      // 诊断：把完整返回结构打出来。不同版本的接口字段名不一样，
+      // 之前假设是 data.url / data.realUrl，但实测 data 是空的。
+      this.logger.info(`resolveDownloadUrl: raw response=${raw.slice(0, 500)}`);
+
+      const pick = (obj: unknown): string | undefined => {
+        if (!obj || typeof obj !== 'object') return undefined;
+        const rec = obj as Record<string, unknown>;
+        for (const key of ['url', 'realUrl', 'real_url', 'downloadUrl', 'download_url', 'cosUrl', 'cos_url']) {
+          const v = rec[key];
+          if (typeof v === 'string' && v) return v;
+        }
+        return undefined;
+      };
+
+      const root = body as Record<string, unknown>;
+      const url = pick(root) ?? pick(root?.data) ?? pick(root?.result);
       if (!url) {
-        this.logger.warn(`resolveDownloadUrl: exchange returned no url; keys=${Object.keys(body?.data ?? {}).join(',')}`);
+        this.logger.warn(`resolveDownloadUrl: no url in response; rootKeys=${Object.keys(root ?? {}).join(',')}; dataKeys=${Object.keys((root?.data as object) ?? {}).join(',')}`);
         return undefined;
       }
       return url;
