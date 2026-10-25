@@ -144,7 +144,13 @@ export async function handleInbound(params: {
     const content: ContentBlock[] = [{ type: 'text', text: body }];
     // Attach images/files so the agent can actually inspect them. Failures are
     // logged and skipped: losing media must not lose the accompanying text.
+    // 诊断：确认附件存储到底有没有注入
+    logger.info(`inbound media diag: hasAttachments=${Boolean(attachments)}; ownBody=${msgBody.length}; hasQuoteMedia=${Boolean(quoteMedia)}`);
+    if (attachments) {
+      logger.info(`inbound media diag: store keys=${Object.keys(attachments).join(',')}; hasSaveImage=${typeof (attachments as { saveImage?: unknown }).saveImage}`);
+    }
     let mediaBlocks = await buildMediaBlocks({ body: msgBody, attachments, logger });
+    logger.info(`inbound media diag: ownBlocks=${mediaBlocks.length}`);
     // 引用的图片/文件也要附上，否则 agent 只看到「[引用消息]」却看不到内容
     if (quoteMedia) {
       try {
