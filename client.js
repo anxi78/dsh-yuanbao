@@ -51,6 +51,8 @@ select.yb-input{font-family:inherit;cursor:pointer;appearance:none;background-im
 .yb-msg.ok{color:#0ea472}
 .yb-msg.err{color:#e0483d}
 .yb-loading{color:var(--dsw-alias-text-secondary,#6b7280);font-size:13px}
+.yb-badge{font-weight:400;font-size:12px;color:#0ea472;font-family:ui-monospace,Menlo,monospace}
+.yb-badge.empty{color:#9aa3ae}
 `
 
     async function asJson(res) {
@@ -68,6 +70,12 @@ select.yb-input{font-family:inherit;cursor:pointer;appearance:none;background-im
       const [mode, setMode] = useState('per-peer')
       const [pinned, setPinned] = useState('')
       const [sessionList, setSessionList] = useState([])
+      // 凭据：输入框里始终是空串，只有用户主动填了才会提交。
+      // 后端不会回显明文，只给掩码 + has* 标记。
+      const [appKey, setAppKey] = useState('')
+      const [appSecret, setAppSecret] = useState('')
+      const [token, setToken] = useState('')
+      const [cred, setCred] = useState({ hasAppKey: false, hasAppSecret: false, hasToken: false, appKey: '', appSecret: '', token: '', botId: '' })
       const [loading, setLoading] = useState(true)
       const [saving, setSaving] = useState(false)
       const [msg, setMsg] = useState(null) // { kind: 'ok'|'err', text }
@@ -78,6 +86,19 @@ select.yb-input{font-family:inherit;cursor:pointer;appearance:none;background-im
           const d = await asJson(await fetch(API, { credentials: 'same-origin' }))
           setMode(d.sessionMode === 'pinned' ? 'pinned' : 'per-peer')
           setPinned(d.pinnedSessionId || '')
+          setCred({
+            hasAppKey: Boolean(d.hasAppKey),
+            hasAppSecret: Boolean(d.hasAppSecret),
+            hasToken: Boolean(d.hasToken),
+            appKey: d.appKey || '',
+            appSecret: d.appSecret || '',
+            token: d.token || '',
+            botId: d.botId || '',
+          })
+          // 输入框保持空白 —— 留空代表"不修改"
+          setAppKey('')
+          setAppSecret('')
+          setToken('')
         } catch (e) {
           setMsg({ kind: 'err', text: '读取失败：' + (e && e.message ? e.message : String(e)) })
         } finally {
@@ -129,17 +150,31 @@ select.yb-input{font-family:inherit;cursor:pointer;appearance:none;background-im
             method: 'PUT',
             credentials: 'same-origin',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ sessionMode: mode, pinnedSessionId: pinned.trim() }),
+            body: JSON.stringify({
+              sessionMode: mode,
+              pinnedSessionId: pinned.trim(),
+              // 留空 = 不修改；填了才提交
+              appKey: appKey.trim(),
+              appSecret: appSecret.trim(),
+              token: token.trim(),
+            }),
           }))
           setMode(d.sessionMode === 'pinned' ? 'pinned' : 'per-peer')
           setPinned(d.pinnedSessionId || '')
-          setMsg({ kind: 'ok', text: '已保存，下一条消息就会按新规则路由' })
+          setAppKey('')
+          setAppSecret('')
+          setToken('')
+          if (d.needsRestart) {
+            setMsg({ kind: 'ok', text: '已保存。凭据改动需要重启 DSH 才会生效' })
+          } else {
+            setMsg({ kind: 'ok', text: '已保存，下一条消息就会按新规则路由' })
+          }
         } catch (e) {
           setMsg({ kind: 'err', text: '保存失败：' + (e && e.message ? e.message : String(e)) })
         } finally {
           setSaving(false)
         }
-      }, [mode, pinned])
+      }, [mode, pinned, appKey, appSecret, token])
 
       if (loading) return h('div', { className: 'yb-wrap' }, h('div', { className: 'yb-loading' }, '读取中…'))
 
@@ -192,6 +227,79 @@ select.yb-input{font-family:inherit;cursor:pointer;appearance:none;background-im
             h('button', { className: 'yb-btn', onClick: save, disabled: saving }, saving ? '保存中…' : '保存'),
             h('button', { className: 'yb-btn ghost', onClick: load, disabled: saving }, '重新读取'),
             msg ? h('span', { className: 'yb-msg ' + msg.kind }, msg.text) : null,
+          ),
+        ),
+
+        // ── 凭据 ──
+        h('div', { className: 'yb-card' },
+          h('h3', { className: 'yb-title' }, '凭据'),
+          h('p', { className: 'yb-desc' },
+            '元宝开放平台的 AppKey / AppSecret。保存后会写到本地设置文件，重启 DSH 生效。',
+          ),
+
+          h('div', { className: 'yb-field' },
+            h('label', { className: 'yb-label' },
+              'AppKey',
+              cred.hasAppKey
+                ? h('span', { className: 'yb-badge' }, ' 已设置 ' + cred.appKey)
+                : h('span', { className: 'yb-badge empty' }, ' 未设置'),
+            ),
+            h('input', {
+              className: 'yb-input',
+              type: 'text',
+              value: appKey,
+              placeholder: cred.hasAppKey ? '留空则不修改' : '粘贴 AppKey',
+              onChange: (e) => setAppKey(e.target.value),
+              autoComplete: 'off',
+              spellCheck: false,
+            }),
+          ),
+
+          h('div', { className: 'yb-field' },
+            h('label', { className: 'yb-label' },
+              'AppSecret',
+              cred.hasAppSecret
+                ? h('span', { className: 'yb-badge' }, ' 已设置 ' + cred.appSecret)
+                : h('span', { className: 'yb-badge empty' }, ' 未设置'),
+            ),
+            h('input', {
+              className: 'yb-input',
+              type: 'password',
+              value: appSecret,
+              placeholder: cred.hasAppSecret ? '留空则不修改' : '粘贴 AppSecret',
+              onChange: (e) => setAppSecret(e.target.value),
+              autoComplete: 'new-password',
+              spellCheck: false,
+            }),
+          ),
+
+          h('div', { className: 'yb-field' },
+            h('label', { className: 'yb-label' },
+              'Token（可选）',
+              cred.hasToken
+                ? h('span', { className: 'yb-badge' }, ' 已设置 ' + cred.token)
+                : h('span', { className: 'yb-badge empty' }, ' 未设置'),
+            ),
+            h('input', {
+              className: 'yb-input',
+              type: 'password',
+              value: token,
+              placeholder: cred.hasToken ? '留空则不修改' : '有预签名 token 才填，否则留空',
+              onChange: (e) => setToken(e.target.value),
+              autoComplete: 'new-password',
+              spellCheck: false,
+            }),
+            h('div', { className: 'yb-tip' },
+              '填了 token 会优先使用它；留空则用 AppKey + AppSecret 自动换取。',
+            ),
+          ),
+
+          cred.botId
+            ? h('div', { className: 'yb-tip' }, '当前 bot id：' + cred.botId)
+            : null,
+
+          h('div', { className: 'yb-tip', style: { marginTop: '14px' } },
+            '安全说明：密钥只存在本机设置文件里，接口不会回显明文。',
           ),
         ),
       )

@@ -28,6 +28,12 @@ const SETTINGS_FILE = '.yuanbao-settings.json';
 type PersistedSettings = {
   sessionMode?: 'per-peer' | 'pinned';
   pinnedSessionId?: string;
+  /** 元宝开放平台 AppKey */
+  appKey?: string;
+  /** 元宝开放平台 AppSecret */
+  appSecret?: string;
+  /** 预签名 token（可选，有就优先用） */
+  token?: string;
 };
 
 function settingsPath(): string {
@@ -77,6 +83,11 @@ export async function apply(ctx: Context, config: YuanbaoDshConfig): Promise<voi
   if (typeof persisted.pinnedSessionId === 'string') {
     resolvedConfig.pinnedSessionId = persisted.pinnedSessionId;
   }
+  // 凭据：设置面板里存的优先于环境变量。
+  // 用户既然在面板里填了，就是想用它，不该被旧的 env 覆盖。
+  if (persisted.appKey) resolvedConfig.appKey = persisted.appKey;
+  if (persisted.appSecret) resolvedConfig.appSecret = persisted.appSecret;
+  if (persisted.token) resolvedConfig.token = persisted.token;
 
   logger.info(`apply() called; envFiles=${loadedEnvFiles.length}; appKey=${resolvedConfig.appKey ? 'set' : 'missing'}; secret=${resolvedConfig.appSecret ? 'set' : 'missing'}; token=${resolvedConfig.token ? 'set' : 'missing'}; sessionMode=${resolvedConfig.sessionMode ?? 'per-peer'}; pinned=${resolvedConfig.pinnedSessionId || '(none)'}`);
 
@@ -126,9 +137,25 @@ export async function apply(ctx: Context, config: YuanbaoDshConfig): Promise<voi
       res.end(body);
     };
 
+    // 凭据一律不回显明文，只告诉前端「有没有设置」和末尾几位。
+    // 设置页不需要看到完整密钥，回显明文只会多一个泄漏面。
+    const mask = (v: string | undefined): string => {
+      if (!v) return '';
+      if (v.length <= 6) return '****';
+      return `${v.slice(0, 3)}${'*'.repeat(Math.min(12, v.length - 6))}${v.slice(-3)}`;
+    };
+
     const current = () => ({
       sessionMode: resolvedConfig.sessionMode ?? 'per-peer',
       pinnedSessionId: resolvedConfig.pinnedSessionId ?? '',
+      appKey: mask(resolvedConfig.appKey),
+      appSecret: mask(resolvedConfig.appSecret),
+      token: mask(resolvedConfig.token),
+      hasAppKey: Boolean(resolvedConfig.appKey),
+      hasAppSecret: Boolean(resolvedConfig.appSecret),
+      hasToken: Boolean(resolvedConfig.token),
+      apiDomain: resolvedConfig.apiDomain ?? '',
+      botId: resolvedConfig.botId ?? '',
     });
 
     webServer.register({
@@ -149,27 +176,60 @@ export async function apply(ctx: Context, config: YuanbaoDshConfig): Promise<voi
               json(res, 400, { ok: false, error: "sessionMode 只能是 'per-peer' 或 'pinned'" });
               return;
             }
+
             // 直接改内存里的 resolvedConfig —— bridge 持有同一个对象引用，
             // 下一次 getOrCreate 就会按新模式算 key，不需要重启插件。
             if (mode !== undefined) resolvedConfig.sessionMode = mode;
             if (typeof pinned === 'string') resolvedConfig.pinnedSessionId = pinned.trim();
+
+            // ── 凭据 ──
+            // 前端传空字符串表示「不改」，传 __clear__ 表示「清空」。
+            // 之所以不用空串代表清空：用户可能只是想改会话路由，不该顺手把密钥抹掉。
+            let credentialsChanged = false;
+            const applySecret = (incoming: unknown, key: 'appKey' | 'appSecret' | 'token'): void => {
+              if (typeof incoming !== 'string') return;
+              if (incoming === '__clear__') {
+                // 用空串表示清空（配置类型是 string，不是 string|undefined）
+                resolvedConfig[key] = '';
+                credentialsChanged = true;
+                return;
+              }
+              const v = incoming.trim();
+              if (!v) return; // 空串 = 保持不变
+              resolvedConfig[key] = v;
+              credentialsChanged = true;
+            };
+            applySecret(parsed.appKey, 'appKey');
+            applySecret(parsed.appSecret, 'appSecret');
+            applySecret(parsed.token, 'token');
 
             // 同时写盘：不然 DSH 一重启，面板里改的东西就没了。
             try {
               await writePersistedSettings({
                 sessionMode: resolvedConfig.sessionMode,
                 pinnedSessionId: resolvedConfig.pinnedSessionId ?? '',
+                appKey: resolvedConfig.appKey,
+                appSecret: resolvedConfig.appSecret,
+                token: resolvedConfig.token,
               });
-              logger.info(`session routing persisted: mode=${resolvedConfig.sessionMode}; pinned=${resolvedConfig.pinnedSessionId || '(none)'}`);
+              logger.info(`settings persisted: mode=${resolvedConfig.sessionMode}; pinned=${resolvedConfig.pinnedSessionId || '(none)'}; credentialsChanged=${credentialsChanged}`);
             } catch (persistError) {
               // 写盘失败不影响本次生效，但要留痕 —— 否则用户会以为保存成功了
-              logger.warn(`session routing persist failed: ${persistError instanceof Error ? persistError.message : String(persistError)}`);
+              logger.warn(`settings persist failed: ${persistError instanceof Error ? persistError.message : String(persistError)}`);
             }
 
+            if (credentialsChanged) {
+              logger.info('credentials updated — 重启 DSH 后生效（WebSocket 需要重新握手）');
+            }
             logger.info(
-              `session routing updated: mode=${resolvedConfig.sessionMode}; pinned=${resolvedConfig.pinnedSessionId || '(none)'}`,
+              `settings updated: mode=${resolvedConfig.sessionMode}; pinned=${resolvedConfig.pinnedSessionId || '(none)'}`,
             );
-            json(res, 200, { ok: true, ...current() });
+            json(res, 200, {
+              ok: true,
+              ...current(),
+              // 凭据改动需要重启才能重连，明确告诉前端
+              needsRestart: credentialsChanged,
+            });
             return;
           }
           json(res, 405, { ok: false, error: 'method not allowed' });
