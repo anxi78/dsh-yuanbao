@@ -14,6 +14,15 @@ export type GatewayDispatch = {
 
 export class YuanbaoGateway {
   private client: YuanbaoWsClient | undefined;
+  /**
+   * The account this gateway is bound to.
+   *
+   * Sign-token resolution writes `botId` into this object, so every sender that
+   * needs the bot identity must share this instance rather than build its own:
+   * a separately constructed account keeps `botId` undefined, and group sends
+   * are then silently skipped for a missing `fromAccount`.
+   */
+  private activeAccount: ResolvedYuanbaoAccount | undefined;
 
   constructor(
     private readonly config: YuanbaoDshConfig,
@@ -22,8 +31,14 @@ export class YuanbaoGateway {
     private readonly onDispatch: (event: GatewayDispatch) => void,
   ) {}
 
+  /** The resolved account, available after `start()`. */
+  get account(): ResolvedYuanbaoAccount | undefined {
+    return this.activeAccount;
+  }
+
   async start(): Promise<YuanbaoWsClient | undefined> {
     const account = this.resolveAccount();
+    this.activeAccount = account;
     this.logger.info(`gateway start; configured=${account.configured}; ws=${account.wsGatewayUrl}`);
     if (!account.enabled || !account.configured) {
       this.logger.warn('channel inactive: missing YUANBAO_APP_KEY/YUANBAO_APP_SECRET or YUANBAO_TOKEN');
@@ -109,6 +124,16 @@ export class YuanbaoGateway {
     };
   }
 
+  /**
+   * Sign-token credentials shaped for HTTP callers (media upload).
+   * Shares the token cache with the WebSocket auth path so a refresh is not
+   * performed twice for the same account.
+   */
+  async httpAuth(account: ResolvedYuanbaoAccount): Promise<{ botId: string; token: string; source: string }> {
+    const auth = await this.resolveAuth(account);
+    return { botId: auth.uid, token: auth.token, source: auth.source };
+  }
+
   private onReady(account: ResolvedYuanbaoAccount, data: WsAuthBindResult): void {
     this.logger.info(`Yuanbao WS ready: connectId=${data.connectId}`);
     this.logger.info(`[${account.accountId}] Yuanbao WS ready: connectId=${data.connectId}`);
@@ -127,7 +152,13 @@ export class YuanbaoGateway {
       return;
     }
     this.logger.info(`gateway dispatch decoded: chat=${converted.chatType}; from=${converted.msg.from_account ?? ''}; to=${converted.msg.to_account ?? ''}; group=${converted.msg.group_code ?? ''}; body=${converted.msg.msg_body?.length ?? 0}; callback=${converted.msg.callback_command ?? ''}`);
-    this.onDispatch({ msg: converted.msg, isGroup: converted.chatType === 'group', client, account });
+    // Isolate the downstream handler: a throw here would propagate back into the
+    // WebSocket frame loop and kill every subsequent inbound message.
+    try {
+      this.onDispatch({ msg: converted.msg, isGroup: converted.chatType === 'group', client, account });
+    } catch (error) {
+      this.logger.error(`gateway dispatch handler failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+    }
   }
 }
 

@@ -12,6 +12,8 @@ import type { SessionManager } from './session/manager.js';
 import type { YuanbaoSender } from './transport/sender.js';
 import { createReplyHeartbeatController } from './transport/heartbeat.js';
 import { handleBuiltinCommand } from './commands.js';
+import { buildMediaBlocks, extractMedias } from './media.js';
+import type { AttachmentStoreLike } from './media.js';
 
 export async function handleInbound(params: {
   msg: YuanbaoInboundMessage;
@@ -20,8 +22,10 @@ export async function handleInbound(params: {
   sender: YuanbaoSender;
   config: YuanbaoDshConfig;
   logger: Logger;
+  /** DSH attachment store, used to persist inbound images/files for the agent. */
+  attachments?: AttachmentStoreLike;
 }): Promise<void> {
-  const { msg, isGroup, manager, sender, config, logger } = params;
+  const { msg, isGroup, manager, sender, config, logger, attachments } = params;
   const scope: ChatScope = isGroup ? 'group' : 'c2c';
   const peerId = isGroup ? msg.group_code : msg.from_account;
   const senderId = msg.from_account;
@@ -40,11 +44,20 @@ export async function handleInbound(params: {
 
   const msgBody = msg.msg_body ?? [];
   const extracted = extractText(msgBody);
-  const botIdentity = config.botId || msg.to_account || '';
+  // Prefer the explicitly configured botId; otherwise fall back to the id
+  // resolved during the sign-token exchange, which is the authoritative
+  // identity for deciding whether this bot was @mentioned.
+  const botIdentity = config.botId || msg.to_account || sender.getAccount().botId || '';
   const mentioned = detectMention(msgBody, extracted, botIdentity);
   logger.info(`inbound text extracted: chars=${extracted.length}; requireMention=${scope === 'group' && config.requireMention ? 'yes' : 'no'}; mentioned=${mentioned ? 'yes' : 'no'}; botIdentity=${botIdentity || 'empty'}`);
   if (scope === 'group' && config.requireMention && !mentioned) {
-    logger.warn(`inbound dropped: group message without mention; group=${peerId}; textPreview=${preview(extracted)}`);
+    // Distinguish "nobody mentioned us" from "we have no identity to compare
+    // against": the latter silently disables every group reply.
+    if (!botIdentity) {
+      logger.warn(`inbound dropped: bot identity unknown, cannot detect @mention; group=${peerId}; textPreview=${preview(extracted)}`);
+    } else {
+      logger.warn(`inbound dropped: group message without mention; group=${peerId}; textPreview=${preview(extracted)}`);
+    }
     logger.debug(`drop group message without mention: group=${peerId}`);
     return;
   }
@@ -75,6 +88,13 @@ export async function handleInbound(params: {
   await manager.enqueue(scope, peerId, async () => {
     const record = await manager.getOrCreate(scope, peerId, senderId, replyTarget);
     const content: ContentBlock[] = [{ type: 'text', text: body }];
+    // Attach images/files so the agent can actually inspect them. Failures are
+    // logged and skipped: losing media must not lose the accompanying text.
+    const mediaBlocks = await buildMediaBlocks({ body: msgBody, attachments, logger });
+    if (mediaBlocks.length > 0) {
+      content.push(...mediaBlocks);
+      logger.info(`inbound media attached: count=${mediaBlocks.length}; scope=${scope}; peer=${peerId}`);
+    }
     const message = createUserMessage({
       content,
       source: { kind: 'user' as const },
@@ -109,29 +129,85 @@ function extractText(body: YuanbaoMsgBodyElement[]): string {
       parts.push(String(content.text));
       continue;
     }
+    if (elem.msg_type === 'TIMCustomElem' && typeof content.data === 'string' && content.data) {
+      try {
+        const parsed = JSON.parse(content.data) as { elem_type?: number; text?: string };
+        if (parsed?.elem_type === 1002) {
+          // @mention: render as its human-readable form so the agent sees it.
+          if (parsed.text) parts.push(String(parsed.text));
+          continue;
+        }
+      } catch {
+        // Not JSON: fall through to the generic handling below.
+      }
+    }
     if (content.text) parts.push(String(content.text));
     if (content.desc) parts.push(`[${elem.msg_type}: ${content.desc}]`);
-    if (content.url) parts.push(`[${elem.msg_type}: ${content.file_name ?? content.url}]`);
     if (content.sound) parts.push('[voice message]');
+    // Media elements carry no text of their own; surface a placeholder so the
+    // agent knows an attachment accompanies this message.
+    const media = extractMedias([elem])[0];
+    if (media) parts.push(media.placeholder);
   }
   return parts.join('\n').trim();
 }
 
-function detectMention(body: YuanbaoMsgBodyElement[], text: string, botId: string): boolean {
-  if (botId && (text.includes(botId) || text.includes(`@${botId}`))) return true;
-  return body.some(elem => {
+/**
+ * Extract @mention elements from the message body.
+ *
+ * TIMCustomElem carries `msg_content.data` as a JSON string; elem_type=1002
+ * means an @mention and carries the mentioned user's id in `user_id`.
+ * Some payloads only expose a human-readable `desc`, so both are handled.
+ */
+function extractMentions(body: YuanbaoMsgBodyElement[]): Array<{ userId: string; text: string }> {
+  const mentions: Array<{ userId: string; text: string }> = [];
+  for (const elem of body) {
     const content = elem.msg_content ?? {};
-    if (elem.msg_type !== 'TIMCustomElem') return false;
-    const desc = typeof content.desc === 'string' ? content.desc.trim() : '';
-    return desc.startsWith('@');
-  });
+    if (elem.msg_type !== 'TIMCustomElem') continue;
+    const raw = typeof content.data === 'string' ? content.data : '';
+    if (!raw) continue;
+    try {
+      const parsed = JSON.parse(raw) as { elem_type?: number; text?: string; user_id?: string };
+      if (parsed?.elem_type !== 1002) continue;
+      mentions.push({
+        userId: typeof parsed.user_id === 'string' ? parsed.user_id : '',
+        text: typeof parsed.text === 'string' ? parsed.text : '',
+      });
+    } catch {
+      // Not JSON (or malformed): fall through to desc-based detection below.
+      const desc = typeof content.desc === 'string' ? content.desc.trim() : '';
+      if (desc.startsWith('@')) mentions.push({ userId: '', text: desc });
+    }
+  }
+  return mentions;
 }
 
+function detectMention(body: YuanbaoMsgBodyElement[], text: string, botId: string): boolean {
+  const mentions = extractMentions(body);
+  // Fail closed: without a known bot identity we cannot tell whether a mention
+  // targets this bot, so we never claim one. Replying to every @mention is far
+  // worse than staying silent -- the group would see the bot answer messages
+  // addressed to other members.
+  if (!botId) return false;
+  if (mentions.some(m => m.userId === botId)) return true;
+  // Fallback for payloads that omit user_id: match the bot id in the @text.
+  if (mentions.some(m => m.userId === '' && m.text.replace(/^@/, '') === botId)) return true;
+  return text.includes(`@${botId}`);
+}
+
+/**
+ * Remove only the mentions addressed to this bot, leaving mentions of other
+ * members intact so the agent still sees who else was referenced.
+ */
 function stripMention(text: string, botId: string): string {
-  const withoutKnownBot = botId
-    ? text.replaceAll(`@${botId}`, '').replaceAll(botId, '')
-    : text;
-  return withoutKnownBot.replace(/\[TIMCustomElem:\s*.*?\]\s*/g, '').trim();
+  let result = text;
+  if (botId) {
+    result = result.replaceAll(`@${botId}`, '');
+  }
+  // Drop the placeholder rendering of our own @mention custom element only.
+  // Mentions of other users render as `[TIMCustomElem: @昵称]` too, but we
+  // cannot attribute those here, so keep them rather than mangling the text.
+  return result.replace(/\[TIMCustomElem:\s*@[^\]]*\]\s*/g, '').trim();
 }
 
 function preview(text: string, max = 120): string {

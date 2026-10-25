@@ -14,18 +14,21 @@ import type {
   YuanbaoDshConfig,
 } from '../types.js';
 import { IdleEvictor } from './idle-evictor.js';
+import { createServiceReader, type ServiceReader } from '../services.js';
 
 export class SessionManager {
   private readonly sessions = new Map<string, SessionRecord>();
   private readonly queues = new Map<string, Promise<void>>();
   private readonly evictor: IdleEvictor;
+  private readonly services: ServiceReader;
 
   constructor(
-    private readonly ctx: Context,
+    ctx: Context,
     private readonly agents: DshAgentRegistry,
     private readonly config: YuanbaoDshConfig,
     private readonly logger: Logger,
   ) {
+    this.services = createServiceReader(ctx, m => logger.warn(m));
     this.evictor = new IdleEvictor(this, config.sessionIdleTimeout, logger);
     this.evictor.start();
   }
@@ -88,21 +91,40 @@ export class SessionManager {
         this.logger.info(`resumed session: key=${key}, sessionId=${sessionId}`);
       } catch (error) {
         this.logger.warn(`session resume failed, creating new: session=${sessionId}; error=${error instanceof Error ? error.message : String(error)}`);
-        this.logger.info(`session create start: session=${sessionId}; cwd=${this.config.cwd || process.cwd()}`);
-        const agentOptions = this.agentOptionsForCreate();
-        const created = await this.agents.create({
-          sessionId,
-          meta: {
-            cwd: this.config.cwd || process.cwd(),
-            ...(agentPreset ? { agentPreset } : {}),
-          },
-          ...(agentOptions ? { agentOptions } : {}),
-          ...(composed.setup ? { setup: composed.setup } : {}),
-        });
-        agent = created.agent;
-        handle = created;
-        this.logger.info(`session created: session=${sessionId}`);
-        this.logger.info(`created session: key=${key}, sessionId=${sessionId}`);
+        // Resume can lose a race with a concurrent turn that already opened the
+        // session (DSH persistence allows one writer per session id per process).
+        // Re-check the live registry before falling back to create.
+        const raced = this.agents.get(sessionId);
+        if (raced) {
+          agent = raced;
+          this.logger.info(`session adopted after resume race: session=${sessionId}`);
+        } else {
+          this.logger.info(`session create start: session=${sessionId}; cwd=${this.config.cwd || process.cwd()}`);
+          const agentOptions = this.agentOptionsForCreate();
+          try {
+            const created = await this.agents.create({
+              sessionId,
+              meta: {
+                cwd: this.config.cwd || process.cwd(),
+                ...(agentPreset ? { agentPreset } : {}),
+              },
+              ...(agentOptions ? { agentOptions } : {}),
+              ...(composed.setup ? { setup: composed.setup } : {}),
+            });
+            agent = created.agent;
+            handle = created;
+            this.logger.info(`session created: session=${sessionId}`);
+            this.logger.info(`created session: key=${key}, sessionId=${sessionId}`);
+          } catch (createError) {
+            // The id is already owned or stored by this process, yet `get` did
+            // not surface it. Dropping the message would be worse than reusing
+            // whatever handle the registry can still produce, so try once more.
+            const adopted = this.agents.get(sessionId);
+            if (!adopted) throw createError;
+            agent = adopted;
+            this.logger.warn(`session adopted after create conflict: session=${sessionId}; error=${createError instanceof Error ? createError.message : String(createError)}`);
+          }
+        }
       }
     }
 
@@ -178,10 +200,30 @@ export class SessionManager {
   }
 
   private sessionKey(scope: ChatScope, peerId: string): string {
+    // ── 会话路由 ──
+    // per-peer（默认，原版行为）：每个群聊/私聊各开一个会话，key 里带 scope + peerId。
+    // pinned：所有消息都路由到同一个 key，于是都进 pinnedSessionId 那个会话。
+    //
+    // 为什么用固定 key 而不是「先拿 pinnedSessionId 去查 agent」：
+    //   getOrCreate 的整个流程（复用内存记录 / 查活跃 agent / 创建）都挂在 key 上，
+    //   只要 key 相同，后续所有路径自然都会落到同一个会话，改动面最小。
+    const mode = this.config.sessionMode ?? 'per-peer';
+    const pinned = (this.config.pinnedSessionId ?? '').trim();
+    if (mode === 'pinned' && pinned) {
+      // 用 pinnedSessionId 本身当 key 的后缀，保证「同一个 pinned 会话」稳定复用一个 record
+      return `yuanbao:${this.config.appKey || 'unknown'}:pinned:${pinned}`;
+    }
     return `yuanbao:${this.config.appKey || 'unknown'}:${scope}:${peerId}`;
   }
 
   private deriveSessionId(key: string): string {
+    // pinned 模式：直接用用户指定的会话 ID，不要再哈希成新 UUID ——
+    // 否则「指定会话」会变成一个全新的空会话，达不到引流的目的。
+    const mode = this.config.sessionMode ?? 'per-peer';
+    const pinned = (this.config.pinnedSessionId ?? '').trim();
+    if (mode === 'pinned' && pinned) {
+      return pinned;
+    }
     const hash = createHash('sha256').update(key).digest('hex');
     return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
   }
@@ -219,9 +261,17 @@ export class SessionManager {
   }
 
   private async composePreset(): Promise<{ agentPreset?: string; setup?: AgentSetup }> {
-    if (!this.config.preset) return {};
+    if (!this.config.preset) {
+      this.logger.warn('no agent preset configured: the Yuanbao session will have no tools (no shell, no file access); set `preset` in the plugin config');
+      return {};
+    }
     const service = this.getService('agentPresets') as AgentPresetsLike | undefined;
-    if (!service) return {};
+    if (!service) {
+      // Falling through here silently produces a tool-less agent, which looks
+      // like "the bot ignores me" rather than a configuration fault.
+      this.logger.error(`agentPresets service unavailable: cannot mount preset "${this.config.preset}"; the session will have no tools`);
+      return {};
+    }
     const resolved = await service.resolve(this.config.preset);
     return {
       agentPreset: resolved.id,
@@ -231,14 +281,16 @@ export class SessionManager {
     };
   }
 
+  /**
+   * Resolve an optional DSH service.
+   *
+   * `agentPresets` is intentionally not declared in `inject`: making it a hard
+   * dependency would stop the plugin loading wherever presets are absent, and
+   * cordis refuses a plain `ctx.agentPresets` read for undeclared services.
+   * `createServiceReader` goes through `ctx.reflect.get`, which is documented as
+   * reading without the inject requirement.
+   */
   private getService(name: string): unknown {
-    const ctxAny = this.ctx as unknown as Record<string, unknown>;
-    if (ctxAny[name] !== undefined) return ctxAny[name];
-    if (typeof ctxAny.get !== 'function') return undefined;
-    try {
-      return (ctxAny.get as (key: string) => unknown)(name);
-    } catch {
-      return undefined;
-    }
+    return this.services.require(name);
   }
 }

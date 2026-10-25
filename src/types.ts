@@ -36,6 +36,14 @@ export type YuanbaoDshConfig = {
   groupPrompt?: string;
   textChunkLimit: number;
   sessionIdleTimeout: number;
+  /**
+   * 会话路由模式：
+   *   'per-peer'  按原版 —— 每个群聊/私聊各开一个独立会话
+   *   'pinned'    所有消息都进 pinnedSessionId 指定的那个会话
+   */
+  sessionMode?: 'per-peer' | 'pinned';
+  /** sessionMode='pinned' 时使用的会话 ID（形如 xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx） */
+  pinnedSessionId?: string;
   processingTimeoutMs: number;
   maxReconnectAttempts: number;
   access: AccessControlConfig;
