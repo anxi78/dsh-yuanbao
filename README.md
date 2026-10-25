@@ -4,6 +4,182 @@
 
 基于 [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) (dsh) 的元宝 IM 通道插件，将元宝开放平台 WebSocket 消息接入 dsh agent runtime。
 
+> **⚠️ 本仓库是定制分支**
+>
+> 上游：[YuanbaoTeam/dsh-yuanbao](https://github.com/YuanbaoTeam/dsh-yuanbao)
+> 本分支： [anxi78/dsh-yuanbao](https://github.com/anxi78/dsh-yuanbao)
+>
+> 相比上游新增了**媒体消息、表情包、Agent 工具、设置面板**等能力，
+> 具体差异见下方「[与上游的差异](#与上游的差异)」。
+> 同步上游：`git fetch upstream && git merge upstream/main`
+
+
+## 与上游的差异
+
+> 对比基准：上游 `9446ebd`（fix: support yuanbao group replies）
+> 统计：**18 个文件，+2591 / -70 行**
+
+### 一、新增功能
+
+#### 1. 媒体消息（图片 / 文件）
+
+| 文件 | 作用 |
+|---|---|
+| `src/media.ts` | 入站媒体：从消息体提取图片/文件、下载到附件存储、转成 agent 可读的 content block |
+| `src/outbound-media.ts` | 出站媒体：COS 上传（腾讯云对象存储）、图片尺寸探测、MIME 推断、构造图片消息体 |
+
+- **入站**：元宝发来的图片/文件会被下载并挂到 agent 上下文，agent 能真正"看到"图片，而不是只收到一句占位文本
+- **出站**：agent 可以把本地图片/文件发回给用户，走 COS 上传后发送
+
+#### 2. 表情包
+
+| 文件 | 作用 |
+|---|---|
+| `src/stickers.ts` | 表情搜索、按引用查找、构造表情消息体 |
+| `assets/builtin-stickers.json` | 内置表情库（542 行） |
+
+- 支持关键词搜索表情
+- agent 可以主动发表情
+
+#### 3. Agent 工具（5 个）
+
+`src/tools.ts` 注册了 5 个可被 agent 调用的工具：
+
+| 工具名 | 用途 |
+|---|---|
+| `yuanbao_send_media` | 发送图片或文件到当前会话 |
+| `yuanbao_send_sticker` | 发送表情包 |
+| `yuanbao_search_stickers` | 搜索可用表情 |
+| `yuanbao_send_message` | 发送纯文本消息 |
+| `yuanbao_list_members` | 列出群成员 |
+
+**意义**：上游只能"被动回复"，现在 agent 可以主动发消息、发图、发表情。
+
+#### 4. 设置面板
+
+`client.js`（219 行）注册了一个设置页「元宝」，支持**会话路由**两种模式：
+
+| 模式 | 行为 |
+|---|---|
+| `per-peer`（默认） | 原版行为：每个群聊/私聊各开一个独立会话 |
+| `pinned` | 所有消息都路由到指定的那一个会话 |
+
+配置项（`src/config.ts`、`src/types.ts`）：
+
+```yaml
+sessionMode: 'per-peer' | 'pinned'   # 会话路由模式
+pinnedSessionId: ''                  # pinned 模式下的目标会话 ID
+```
+
+**留空自动回退到 per-peer**，不会因为配置错误把消息塞进空会话。
+
+### 二、修复的问题
+
+#### 1. 群消息发送失败（`bot_id is required`）
+
+**问题**：`bridge.ts` 里原本会单独构造一个 account 对象，导致 `botId` 为 undefined，群消息发送时被平台拒绝。
+
+**修复**：复用 gateway 已解析的 account 对象（`gateway.account`），保证 `botId` 一致。
+
+```ts
+// Reuse the gateway's account: sign-token resolution stored the bot id on
+// that exact object. Building a second account here would leave `botId`
+// undefined and make every group send fail the `fromAccount` check.
+const account = gateway.account ?? gatewayAccountFromConfig(this.config);
+```
+
+#### 2. @提及判定失效
+
+**问题**：群聊里判断"有没有 @ 我"时，如果拿不到 botId 就静默判定为"没被提及"，导致**所有群消息都不回复**。
+
+**修复**：优先用配置的 `botId`，否则回退到 sign-token 交换时解析出的 id；并区分「确实没人 @ 我」和「我没有身份可比对」两种情况。
+
+#### 3. 发送结果谎报成功
+
+**问题**：发送失败时仍然返回成功，工具层显示"已发送"但实际什么都没发出去。
+
+**修复**：`sender.ts` 传播真实传输结果，失败会抛错。
+
+```ts
+// Propagate the transport outcome: reporting success unconditionally is
+// what made the tool claim "sent" while nothing left the device.
+```
+
+#### 4. 附件被静默丢弃
+
+**问题**：出站消息只处理纯文本，带图片/文件的消息会被过滤掉，附件消失。
+
+**修复**：`outbound.ts` 把文本和媒体分开收集，任何组合都能正确发送。
+
+#### 5. 媒体消息的文本占位
+
+**问题**：图片/文件消息体本身没有文本，agent 收到的消息是空的。
+
+**修复**：为媒体元素生成占位符，让 agent 知道"这里有个图/文件"。
+
+#### 6. @提及显示为原始 JSON
+
+**问题**：消息里的 @ 元素被原样传给 agent，agent 看到的是 JSON 片段。
+
+**修复**：渲染成人类可读的形式（如 `@用户名`）。
+
+### 三、架构改动
+
+#### 服务读取封装（`src/services.ts`）
+
+Cordis 插件读取未声明的服务会抛错。新增的 `createServiceReader` 把这类读取包起来，读取失败降级为 warn 日志而不是崩溃。
+
+```ts
+// Cordis throws `cannot get property "X" without inject` when a plugin reads
+// a service it did not declare.
+```
+
+#### 会话管理器增强（`src/session/manager.ts`）
+
+- `sessionKey()` 支持 `pinned` 模式：所有消息共用同一个 key
+- `deriveSessionId()` 在 pinned 模式下直接返回指定 ID，不再哈希成新 UUID
+- 队列串行化，避免同一会话并发处理
+
+### 四、文件清单
+
+**新增（8 个）**
+
+```
+assets/builtin-stickers.json   542 行   内置表情库
+client.js                      219 行   设置面板
+src/media.ts                   203 行   入站媒体
+src/outbound-media.ts          363 行   出站媒体
+src/services.ts                 59 行   服务读取封装
+src/stickers.ts                131 行   表情包
+src/tools.ts                   407 行   Agent 工具
+src/dsh-tools.d.ts              13 行   工具类型声明
+```
+
+**修改（10 个）**
+
+```
+src/bridge.ts                   +71    复用 gateway account、注册工具
+src/transport/sender.ts        +173    发送结果传播、身份校验
+src/transport/outbound.ts      +116    媒体消息支持
+src/session/manager.ts         +104    会话路由
+src/inbound.ts                 +106    @提及判定、媒体提取
+src/index.ts                    +91    服务注入、配置
+src/gateway/index.ts            +33    account 暴露、httpAuth
+src/config.ts                    +6    会话路由配置
+src/types.ts                     +8    类型定义
+package.json                    +16    client 入口声明
+```
+
+### 五、同步上游
+
+```bash
+git fetch upstream
+git merge upstream/main
+```
+
+本分支的改动集中在新增文件和少数函数的局部修改，**冲突面较小**。
+
+
 ## 架构
 
 ```text
@@ -222,6 +398,8 @@ agent-default-model:
 | `groupPrompt` | string | - | 群聊额外 system prompt |
 | `textChunkLimit` | number | `3000` | 单条出站消息最大字符数 |
 | `sessionIdleTimeout` | number | `1800000` | 会话闲置超时，默认 30 分钟 |
+| `sessionMode` | `per-peer` / `pinned` | `per-peer` | **本分支新增**：会话路由模式 |
+| `pinnedSessionId` | string | `''` | **本分支新增**：pinned 模式下的目标会话 ID，留空回退 per-peer |
 | `processingTimeoutMs` | number | `120000` | Agent 处理超时 |
 | `maxReconnectAttempts` | number | `100` | WebSocket 最大重连次数 |
 | `access.c2cMode` | `open` / `allowlist` / `disabled` | `open` | 私聊访问控制 |
@@ -303,6 +481,21 @@ sessionId  = sha256(sessionKey) 派生
 - 同一个元宝群聊上下文连续
 - dsh 重启后可恢复历史 session
 - 不直接暴露元宝用户标识
+
+### pinned 模式（本分支新增）
+
+把 `sessionMode` 设为 `pinned` 并填上 `pinnedSessionId` 后，**所有群聊和私聊的消息都会路由到同一个会话**：
+
+```text
+sessionKey = yuanbao:${accountId}:pinned:${pinnedSessionId}
+sessionId  = pinnedSessionId（直接使用，不再哈希）
+```
+
+使用场景：想让所有渠道的消息都汇总到一个"总控"会话里，由同一个 agent 上下文统一处理。
+
+在「设置 → 元宝」里可以直接切换，会话列表从 DSH 实时读取，不用手填 UUID。
+
+**留空 `pinnedSessionId` 会自动回退到 per-peer**，不会把所有消息塞进一个空会话。
 
 ## 设计原则
 
