@@ -160,7 +160,19 @@ export async function handleInbound(params: {
     // 引用媒体已经有现成的 url 和 name，直接下载 + 存进附件库即可。
     if (quoteMedia && attachments) {
       try {
-        const downloaded = await downloadMedia(quoteMedia, logger);
+        // 入站媒体给的是 hunyuan 的 resourceId 地址，直接 GET 会 401。
+        // 先换成真正的 COS 地址再下载。
+        let effective = quoteMedia;
+        if (quoteMedia.url.includes('resourceId=')) {
+          const resolvedUrl = await sender.resolveDownloadUrl(quoteMedia.url);
+          if (resolvedUrl) {
+            effective = { ...quoteMedia, url: resolvedUrl };
+            logger.info(`inbound quoted media url resolved: name=${quoteMedia.name}`);
+          } else {
+            logger.warn(`inbound quoted media url unresolved, trying raw: name=${quoteMedia.name}`);
+          }
+        }
+        const downloaded = await downloadMedia(effective, logger);
         if (downloaded) {
           const guessed = quoteMedia.kind === 'image' ? guessImageMediaType(quoteMedia.name) : undefined;
           const mediaType = guessed ?? downloaded.mediaType;

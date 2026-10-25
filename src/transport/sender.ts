@@ -249,4 +249,73 @@ export class YuanbaoSender {
   getAccount(): ResolvedYuanbaoAccount {
     return this.account;
   }
+
+  /**
+   * 把元宝的 resourceId 换成真正的下载地址。
+   *
+   * 入站媒体里的 url 形如：
+   *   https://hunyuan.tencent.com/api/resource/download?resourceId=xxx
+   * 这个地址直接 GET 会返回 401 —— 它需要 X-ID / X-Token 鉴权头。
+   *
+   * 正确做法是先调元宝的 resource/v1/download 接口（带鉴权）换出
+   * 一个真正的 COS 地址，再下载那个地址。
+   *
+   * @returns 可直接匿名下载的 URL；解析失败返回 undefined
+   */
+  async resolveDownloadUrl(rawUrl: string): Promise<string | undefined> {
+    const resourceId = extractResourceId(rawUrl);
+    if (!resourceId) return undefined;
+
+    if (!this.resolveAuth) {
+      this.logger.warn('resolveDownloadUrl: no auth resolver, cannot exchange resourceId');
+      return undefined;
+    }
+
+    let auth: HttpAuth;
+    try {
+      auth = await this.resolveAuth(this.account);
+    } catch (error) {
+      this.logger.warn(`resolveDownloadUrl: auth failed; ${error instanceof Error ? error.message : String(error)}`);
+      return undefined;
+    }
+
+    const endpoint = `https://${this.account.apiDomain}/api/resource/v1/download?resourceId=${encodeURIComponent(resourceId)}`;
+    try {
+      const response = await fetch(endpoint, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-ID': auth.botId || this.account.botId || '',
+          'X-Token': auth.token,
+          'X-Source': auth.source || 'web',
+          'X-Instance-Id': '16',
+        },
+      });
+      if (!response.ok) {
+        this.logger.warn(`resolveDownloadUrl: exchange failed; status=${response.status}`);
+        return undefined;
+      }
+      const body = (await response.json()) as { data?: { url?: string; realUrl?: string } };
+      const url = body?.data?.url ?? body?.data?.realUrl;
+      if (!url) {
+        this.logger.warn(`resolveDownloadUrl: exchange returned no url; keys=${Object.keys(body?.data ?? {}).join(',')}`);
+        return undefined;
+      }
+      return url;
+    } catch (error) {
+      this.logger.warn(`resolveDownloadUrl: request error; ${error instanceof Error ? error.message : String(error)}`);
+      return undefined;
+    }
+  }
+}
+
+/** 从 hunyuan 的下载地址里抠出 resourceId */
+function extractResourceId(rawUrl: string): string | undefined {
+  try {
+    const parsed = new URL(rawUrl);
+    const id = parsed.searchParams.get('resourceId');
+    return id || undefined;
+  } catch {
+    return undefined;
+  }
 }
