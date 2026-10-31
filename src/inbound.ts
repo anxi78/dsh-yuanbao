@@ -107,7 +107,7 @@ export async function handleInbound(params: {
   // 顺序反了的话，读到的就是当前这条，判断永远不成立。
   const prevMessage = isGroup ? lastMessage(chatKey) : undefined;
 
-  let autoImage: InboundMedia | undefined;
+  const autoImages: InboundMedia[] = [];
   if (isGroup && msg.from_account) {
     // 用「最后一条消息」判断，不是「最后一条媒体」。
     // 差别很关键：如果中间有人发了文字，媒体历史里不会有记录，
@@ -118,16 +118,18 @@ export async function handleInbound(params: {
       // 混着文件、或纯文件、或纯文字，都不触发。
       const onlyImages = last.medias.length > 0 && last.medias.every(m => m.kind === 'image');
       if (onlyImages) {
-        const first = last.medias[0];
-        if (first) {
-          autoImage = {
+        // 一次发多张时全部带上，不是只取第一张
+        for (const m of last.medias) {
+          if (!m.url) continue;
+          const name = m.name || `auto-image-${autoImages.length + 1}.jpg`;
+          autoImages.push({
             kind: 'image',
-            url: first.url,
-            name: first.name || 'auto-image.jpg',
-            placeholder: `[image: ${first.name || 'auto-image.jpg'}]`,
-          };
-          logger.info(`inbound auto-image: 上一条是同一人发的纯图片，自动附带; name=${autoImage.name}`);
+            url: m.url,
+            name,
+            placeholder: `[image: ${name}]`,
+          });
         }
+        logger.info(`inbound auto-image: 上一条是同一人发的纯图片，自动附带 ${autoImages.length} 张`);
       } else {
         logger.info(`inbound auto-image skipped: 上一条不是纯图片（kinds=${last.mediaKinds.join(',') || 'none'}）`);
       }
@@ -235,7 +237,7 @@ export async function handleInbound(params: {
     return;
   }
 
-  const body = buildAgentBody({ msg, text, scope, mentioned, config, quote, quoteMedia, history: pendingHistory, botIdentity, autoImage });
+  const body = buildAgentBody({ msg, text, scope, mentioned, config, quote, quoteMedia, history: pendingHistory, botIdentity, autoImages });
   if (!body.trim()) {
     logger.warn('inbound dropped: empty agent body');
     return;
@@ -304,34 +306,37 @@ export async function handleInbound(params: {
     }
     // ── 自动附图（发图后立刻 @bot）──
     // 和引用媒体走同一套下载流程：先换 COS 地址，再下载、存附件库。
-    if (autoImage && attachments) {
-      try {
-        let effective = autoImage;
-        if (autoImage.url.includes('resourceId=')) {
-          const resolvedUrl = await sender.resolveDownloadUrl(autoImage.url);
-          if (resolvedUrl) {
-            effective = { ...autoImage, url: resolvedUrl };
-            logger.info(`inbound auto-image url resolved: name=${autoImage.name}`);
+    // 一次发多张时逐张处理，任何一张失败都不影响其他张。
+    if (autoImages.length > 0 && attachments) {
+      for (const image of autoImages) {
+        try {
+          let effective = image;
+          if (image.url.includes('resourceId=')) {
+            const resolvedUrl = await sender.resolveDownloadUrl(image.url);
+            if (resolvedUrl) {
+              effective = { ...image, url: resolvedUrl };
+              logger.info(`inbound auto-image url resolved: name=${image.name}`);
+            }
           }
-        }
-        const downloaded = await downloadMedia(effective, logger);
-        if (downloaded) {
-          const guessed = guessImageMediaType(autoImage.name);
-          const mediaType = guessed ?? downloaded.mediaType;
-          if (mediaType && IMAGE_MEDIA_TYPES.has(mediaType)) {
-            const ref = await attachments.saveImage({
-              data: downloaded.data,
-              mediaType,
-              name: autoImage.name,
-            });
-            mediaBlocks = mediaBlocks.concat([{ type: 'image', attachment: ref } as unknown as ContentBlock]);
-            logger.info(`inbound auto-image attached: name=${autoImage.name}; bytes=${downloaded.data.byteLength}`);
+          const downloaded = await downloadMedia(effective, logger);
+          if (downloaded) {
+            const guessed = guessImageMediaType(image.name);
+            const mediaType = guessed ?? downloaded.mediaType;
+            if (mediaType && IMAGE_MEDIA_TYPES.has(mediaType)) {
+              const ref = await attachments.saveImage({
+                data: downloaded.data,
+                mediaType,
+                name: image.name,
+              });
+              mediaBlocks = mediaBlocks.concat([{ type: 'image', attachment: ref } as unknown as ContentBlock]);
+              logger.info(`inbound auto-image attached: name=${image.name}; bytes=${downloaded.data.byteLength}`);
+            }
+          } else {
+            logger.warn(`inbound auto-image download failed: name=${image.name}`);
           }
-        } else {
-          logger.warn(`inbound auto-image download failed: name=${autoImage.name}`);
+        } catch (error) {
+          logger.warn(`inbound auto-image attach failed: ${image.name}; ${error instanceof Error ? error.message : String(error)}`);
         }
-      } catch (error) {
-        logger.warn(`inbound auto-image attach failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
@@ -480,10 +485,10 @@ function buildAgentBody(params: {
   history?: TextHistoryEntry[];
   /** bot 自己的身份，用于在上下文里标注「你是谁」 */
   botIdentity?: string;
-  /** 发图后立刻 @bot 时自动附带的那张图 */
-  autoImage?: InboundMedia;
+  /** 发图后立刻 @bot 时自动附带的图片（可能多张） */
+  autoImages?: InboundMedia[];
 }): string {
-  const { msg, text, scope, mentioned, config, quote, quoteMedia, history, botIdentity, autoImage } = params;
+  const { msg, text, scope, mentioned, config, quote, quoteMedia, history, botIdentity, autoImages } = params;
   const prompt = scope === 'group' ? config.groupPrompt : config.directPrompt;
   const header = scope === 'group'
     ? `[Yuanbao group message from ${msg.sender_nickname ?? msg.from_account ?? 'unknown'} in group ${msg.group_name ?? msg.group_code ?? 'unknown'}${mentioned ? ', mentioned bot' : ''}]`
@@ -515,7 +520,9 @@ function buildAgentBody(params: {
   const quoteBlock = quote ? formatQuoteContext(quote, quoteMedia) : '';
 
   // 自动附图时给 agent 一句提示，否则它不知道附件从哪来的
-  const autoBlock = autoImage ? `[附注：发送者刚发了一张图片，已作为附件一并提供：${autoImage.name}]` : '';
+  const autoBlock = autoImages && autoImages.length > 0
+    ? `[附注：发送者刚发了 ${autoImages.length} 张图片，已作为附件一并提供：${autoImages.map(i => i.name).join('、')}]`
+    : '';
 
   return [prompt, header, metadata ? `<metadata>\n${metadata}\n</metadata>` : '', historyBlock, autoBlock, quoteBlock, text]
     .filter(Boolean)
