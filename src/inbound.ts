@@ -107,6 +107,35 @@ export async function handleInbound(params: {
     });
   }
 
+  // 诊断：把 cloud_custom_data 原文打出来。
+  if (msg.cloud_custom_data) {
+    logger.info(`inbound cloud_custom_data: ${String(msg.cloud_custom_data).slice(0, 600)}`);
+  } else {
+    logger.info('inbound cloud_custom_data: (empty)');
+  }
+
+  // ── 先解析引用（必须在 @bot 检查之前）──
+  // 用户可能发一条「只有引用、没有 @」的消息（比如引用一段文字然后只打
+  // 几个不可见字符）。这条消息会被 requireMention 丢掉，但它引用的内容
+  // 应该记进历史 —— 否则后面 @bot 时完全不知道之前引用过什么。
+  const earlyQuote = parseQuote(msg.cloud_custom_data);
+  if (earlyQuote) {
+    logger.info(`inbound early quote: type=${earlyQuote.type ?? '?'}; hasDesc=${Boolean(earlyQuote.desc)}; id=${earlyQuote.id ?? ''}`);
+    if (isGroup && historyLimit > 0) {
+      const quoteText = earlyQuote.desc?.trim();
+      if (quoteText) {
+        // 引用的是文字：把引用内容也记进历史，让它成为上下文的一部分
+        rememberText(chatKey, {
+          messageId: msg.msg_id,
+          sender: msg.sender_nickname ?? msg.from_account ?? 'unknown',
+          senderId: msg.from_account,
+          body: `[引用 ${earlyQuote.sender_nickname ?? earlyQuote.sender_id ?? '某人'} 的消息] ${quoteText}`,
+        });
+        logger.info(`inbound early quote recorded to history: chars=${quoteText.length}`);
+      }
+    }
+  }
+
   // Prefer the explicitly configured botId; otherwise fall back to the id
   // resolved during the sign-token exchange, which is the authoritative
   // identity for deciding whether this bot was @mentioned.
