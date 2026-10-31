@@ -44,6 +44,8 @@ export type YuanbaoDshConfig = {
   sessionMode?: 'per-peer' | 'pinned';
   /** sessionMode='pinned' 时使用的会话 ID（形如 xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx） */
   pinnedSessionId?: string;
+  /** 群聊上下文条数：@bot 时把最近 N 条群消息一起带给 agent。0 = 关闭 */
+  historyLimit?: number;
   processingTimeoutMs: number;
   maxReconnectAttempts: number;
   access: AccessControlConfig;

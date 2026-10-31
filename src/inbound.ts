@@ -14,7 +14,7 @@ import { createReplyHeartbeatController } from './transport/heartbeat.js';
 import { handleBuiltinCommand } from './commands.js';
 import { buildMediaBlocks, downloadMedia, extractMedias, guessImageMediaType, IMAGE_MEDIA_TYPES, type InboundMedia } from './media.js';
 import { formatQuoteContext, parseQuote, resolveQuoteMedia, type QuoteInfo } from './quote.js';
-import { deriveChatKey, rememberMedia } from './chat-history.js';
+import { consumeText, deriveChatKey, recentText, rememberMedia, rememberText, type TextHistoryEntry } from './chat-history.js';
 import type { AttachmentStoreLike } from './media.js';
 
 export async function handleInbound(params: {
@@ -87,6 +87,26 @@ export async function handleInbound(params: {
     logger.info(`inbound media remembered: count=${ownMedias.length}; chatKey=${chatKey}; msgId=${msg.msg_id ?? ''}`);
   }
 
+  // ── 先取出「当前消息之前」的历史，再记录当前消息 ──
+  // 顺序不能反：先记录再取，当前消息会在历史和正文里各出现一次。
+  // 只有群聊需要历史；私聊本身就是一对一，没有「群里别人说话」的概念。
+  const historyLimit = isGroup ? (config.historyLimit ?? 20) : 0;
+  const pendingHistory: TextHistoryEntry[] = historyLimit > 0
+    ? recentText(chatKey, historyLimit)
+    : [];
+
+  // 记录当前这条消息（同样在 @bot 检查之前）。
+  // 没 @bot 的消息会被 requireMention 丢掉，但它已经进了历史，
+  // 下次有人 @bot 时就能看到它。
+  if (isGroup && historyLimit > 0) {
+    rememberText(chatKey, {
+      messageId: msg.msg_id,
+      sender: msg.sender_nickname ?? msg.from_account ?? 'unknown',
+      senderId: msg.from_account,
+      body: stripMention(extracted, config.botId || msg.to_account || sender.getAccount().botId || ''),
+    });
+  }
+
   // Prefer the explicitly configured botId; otherwise fall back to the id
   // resolved during the sign-token exchange, which is the authoritative
   // identity for deciding whether this bot was @mentioned.
@@ -132,7 +152,7 @@ export async function handleInbound(params: {
     return;
   }
 
-  const body = buildAgentBody({ msg, text, scope, mentioned, config, quote, quoteMedia });
+  const body = buildAgentBody({ msg, text, scope, mentioned, config, quote, quoteMedia, history: pendingHistory, botIdentity });
   if (!body.trim()) {
     logger.warn('inbound dropped: empty agent body');
     return;
@@ -215,6 +235,13 @@ export async function handleInbound(params: {
     record.agent.followup(message);
     logger.info(`agent followup sent: session=${record.sessionId}; scope=${scope}; peer=${peerId}`);
     logger.info(`followup sent: scope=${scope}, peer=${peerId}, session=${record.sessionId}`);
+
+    // 这批历史已经进了 agent 的上下文，清掉避免下次重复。
+    // 只清「本次带进去的条数」，期间新到的消息保留。
+    if (scope === 'group' && historyLimit > 0 && pendingHistory.length > 0) {
+      consumeText(chatKey, pendingHistory.length);
+      logger.info(`inbound history consumed: count=${pendingHistory.length}; chatKey=${chatKey}`);
+    }
   });
 }
 
@@ -332,21 +359,43 @@ function buildAgentBody(params: {
   quote?: QuoteInfo;
   /** 引用里回查到的媒体实体（图片/文件） */
   quoteMedia?: InboundMedia;
+  /** @bot 之前群里最近的若干条消息（不含当前这条） */
+  history?: TextHistoryEntry[];
+  /** bot 自己的身份，用于在上下文里标注「你是谁」 */
+  botIdentity?: string;
 }): string {
-  const { msg, text, scope, mentioned, config, quote, quoteMedia } = params;
+  const { msg, text, scope, mentioned, config, quote, quoteMedia, history, botIdentity } = params;
   const prompt = scope === 'group' ? config.groupPrompt : config.directPrompt;
   const header = scope === 'group'
     ? `[Yuanbao group message from ${msg.sender_nickname ?? msg.from_account ?? 'unknown'} in group ${msg.group_name ?? msg.group_code ?? 'unknown'}${mentioned ? ', mentioned bot' : ''}]`
     : `[Yuanbao direct message from ${msg.sender_nickname ?? msg.from_account ?? 'unknown'}]`;
+
   const metadata = [
     msg.msg_id ? `message_id: ${msg.msg_id}` : '',
     msg.trace_id ? `trace_id: ${msg.trace_id}` : '',
+    scope === 'group' && botIdentity ? `you_are: ${botIdentity}` : '',
   ].filter(Boolean).join('\n');
+
+  // ── 群聊上下文 ──
+  // 把 @bot 之前的群消息按时间顺序拼进来，让 agent 知道刚才在聊什么。
+  // 每行格式：`昵称: 内容`，跟当前消息的署名风格保持一致。
+  let historyBlock = '';
+  if (scope === 'group' && history && history.length > 0) {
+    const lines = history.map((entry) => {
+      const who = entry.sender || entry.senderId || 'unknown';
+      return `${who}: ${entry.body}`;
+    });
+    historyBlock = [
+      '[群聊最近消息（按时间顺序，最后一条最旧→最新）]',
+      ...lines,
+      '[以上是 @bot 之前的消息，下面是本次 @bot 的内容]',
+    ].join('\n');
+  }
 
   // 引用内容放在正文之前，让 agent 先看到"他在回复哪条消息"
   const quoteBlock = quote ? formatQuoteContext(quote, quoteMedia) : '';
 
-  return [prompt, header, metadata ? `<metadata>\n${metadata}\n</metadata>` : '', quoteBlock, text]
+  return [prompt, header, metadata ? `<metadata>\n${metadata}\n</metadata>` : '', historyBlock, quoteBlock, text]
     .filter(Boolean)
     .join('\n\n');
 }

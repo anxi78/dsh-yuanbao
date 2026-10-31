@@ -28,6 +28,9 @@ const schemaObject = Schema.object({
   pinnedSessionId: Schema.string()
     .default('')
     .description('sessionMode=pinned 时使用的会话 ID（在 DSH 会话列表里能看到，形如 xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx）。留空则回退到 per-peer'),
+  historyLimit: Schema.number()
+    .default(20)
+    .description('群聊上下文条数：@bot 时把最近 N 条群消息一起带给 agent。设为 0 关闭'),
   processingTimeoutMs: Schema.number().default(120000).description('Agent processing timeout in ms'),
   maxReconnectAttempts: Schema.number().default(100).description('Maximum WebSocket reconnect attempts'),
   access: Schema.object({
