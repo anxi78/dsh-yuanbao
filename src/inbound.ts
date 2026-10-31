@@ -129,7 +129,7 @@ export async function handleInbound(params: {
           messageId: msg.msg_id,
           sender: msg.sender_nickname ?? msg.from_account ?? 'unknown',
           senderId: msg.from_account,
-          body: `[引用 ${earlyQuote.sender_nickname ?? earlyQuote.sender_id ?? '某人'} 的消息] ${quoteText}`,
+          body: `[引用 ${earlyQuote.sender_nickname ?? earlyQuote.sender_id ?? '某人'} 的消息: ${quoteText}]`,
         });
         logger.info(`inbound early quote recorded to history: chars=${quoteText.length}`);
       }
