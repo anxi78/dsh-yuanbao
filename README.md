@@ -21,7 +21,7 @@ npm: [`@anxi78/dsh-yuanbao`](https://www.npmjs.com/package/@anxi78/dsh-yuanbao)
 ## 与上游的差异
 
 > 对比基准：上游 `9446ebd`（fix: support yuanbao group replies）
-> 统计：**18 个文件，+2591 / -70 行**
+> 统计：**23 个文件，+4012 / -115 行**
 
 ### 一、新增功能
 
@@ -76,6 +76,73 @@ pinnedSessionId: ''                  # pinned 模式下的目标会话 ID
 ```
 
 **留空自动回退到 per-peer**，不会因为配置错误把消息塞进空会话。
+
+#### 5. 群聊上下文
+
+**@bot 时能看到群里刚才聊了什么**，而不只是当前这一条。
+
+| 项 | 说明 |
+|---|---|
+| `src/chat-history.ts` | 文本历史（每会话 200 条）+ 媒体历史（50 条）+ 最后一条消息追踪 |
+| `src/inbound.ts` | 在 @bot 检查**之前**先记录，没 @bot 的消息也会进历史 |
+
+拼进上下文的格式：
+
+```
+[群聊最近消息（按时间顺序，最后一条最旧→最新）]
+Alice: 刚才那个方案怎么样
+Bob: 我觉得可以
+[以上是 @bot 之前的消息，下面是本次 @bot 的内容]
+```
+
+回复完成后按 `historyLimit` 清掉已消费的部分，避免下次重复。
+
+配置项：
+
+```yaml
+historyLimit: 20    # 默认 20 条，0 = 关闭
+```
+
+**持久化**：历史落盘到 `~/.dsh/.yuanbao-history.json`，重启不再失忆。
+（只存文本，不存媒体 —— 媒体的 url 带签名时效，过期了也用不了。）
+
+#### 6. 发图后立刻 @bot，自动带上那张图
+
+**场景**：用户先发一张图（这条 @ 不到 bot），紧接着 @bot 问「这张图是什么」。
+
+**触发条件（缺一不可）：**
+
+| 条件 | 说明 |
+|---|---|
+| **同一个人** | 上一条必须是当前发送者发的 |
+| **必须是最后一条** | 中间有任何人的消息都不算，**包括自己发的文字** |
+| **只对图片** | 文件不生效，图+文件混合也不生效 |
+
+实现要点：`chatLastMessage` 单独追踪「最后一条消息」——文本历史只记有正文的消息，
+纯图片会被跳过，所以需要独立的记录来判断上一条到底是什么。
+
+#### 7. 引用消息（文字 + 媒体）
+
+**引用信息不在 `msg_body`，而在消息级的 `cloud_custom_data`：**
+
+```json
+{ "quote": { "desc": "被引用的文字", "type": 2, "id": "msgId" } }
+```
+
+`type`：1 文字 / 2 图片 / 3 文件 / 4 视频 / 5 语音。
+
+| 引用类型 | 处理 |
+|---|---|
+| **文字** | 格式化为 `> [引用消息 from 某人]: 内容` |
+| **媒体** | `desc` 为空，按 `id` 回查媒体历史 → 换取真实 COS 地址 → 下载 → 作为附件 |
+
+**关键坑**：入站媒体给的是 `hunyuan.tencent.com/api/resource/download?resourceId=xxx`，
+直接 GET 返回 **401**。必须先调 `/api/resource/v1/download` 换取真正的 COS 地址。
+
+#### 8. 设置面板持久化
+
+设置存到 `~/.dsh/.yuanbao-settings.json`，重启不丢。
+（为什么不写 `cordis.patch.yml`：那是静态配置，改一次要手写 YAML 再重启。）
 
 ### 二、修复的问题
 
@@ -146,33 +213,37 @@ Cordis 插件读取未声明的服务会抛错。新增的 `createServiceReader`
 
 ### 四、文件清单
 
-**新增（8 个）**
+**新增（10 个）**
 
 ```
 assets/builtin-stickers.json   542 行   内置表情库
-client.js                      219 行   设置面板
-src/media.ts                   203 行   入站媒体
+client.js                      327 行   设置面板
+src/media.ts                   207 行   入站媒体
 src/outbound-media.ts          363 行   出站媒体
 src/services.ts                 59 行   服务读取封装
 src/stickers.ts                131 行   表情包
 src/tools.ts                   407 行   Agent 工具
+src/chat-history.ts            363 行   文本/媒体历史、持久化
+src/quote.ts                   157 行   引用消息解析
 src/dsh-tools.d.ts              13 行   工具类型声明
 ```
 
-**修改（10 个）**
+**修改（13 个）**
 
 ```
-src/bridge.ts                   +71    复用 gateway account、注册工具
-src/transport/sender.ts        +173    发送结果传播、身份校验
-src/transport/outbound.ts      +116    媒体消息支持
-src/session/manager.ts         +104    会话路由
-src/inbound.ts                 +106    @提及判定、媒体提取
-src/index.ts                    +91    服务注入、配置
-src/gateway/index.ts            +33    account 暴露、httpAuth
-src/config.ts                    +6    会话路由配置
-src/types.ts                     +8    类型定义
-package.json                    +16    client 入口声明
+src/inbound.ts                 主要改动  @提及判定、媒体提取、历史、自动附图
+src/transport/sender.ts         +265    发送结果传播、身份校验、COS 地址换取
+src/transport/outbound.ts       +116    媒体消息支持
+src/session/manager.ts          +104    会话路由
+src/bridge.ts                    +71    复用 gateway account、注册工具
+src/index.ts                     +91    服务注入、配置、历史恢复
+src/gateway/index.ts             +33    account 暴露、httpAuth
+src/config.ts                    +10    会话路由、historyLimit
+src/types.ts                     +10    类型定义
+package.json                     +16    client 入口声明
 ```
+
+**总计**：`23 files changed, 4012 insertions(+), 115 deletions(-)`
 
 ### 五、同步上游
 
@@ -396,6 +467,7 @@ agent-default-model:
 | `sessionIdleTimeout` | number | `1800000` | 会话闲置超时，默认 30 分钟 |
 | `sessionMode` | `per-peer` / `pinned` | `per-peer` | **本分支新增**：会话路由模式 |
 | `pinnedSessionId` | string | `''` | **本分支新增**：pinned 模式下的目标会话 ID，留空回退 per-peer |
+| `historyLimit` | number | `20` | **本分支新增**：群聊上下文条数，@bot 时带上最近 N 条；0 = 关闭 |
 | `processingTimeoutMs` | number | `120000` | Agent 处理超时 |
 | `maxReconnectAttempts` | number | `100` | WebSocket 最大重连次数 |
 | `access.c2cMode` | `open` / `allowlist` / `disabled` | `open` | 私聊访问控制 |
