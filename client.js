@@ -13,7 +13,7 @@
  *   slots.inject('settings.section', () => slots.register({...}, () => h(Panel)))
  */
 window.__ModuleLoader__.load({
-  id: 'dsh-yuanbao',
+  id: '@anxi78/dsh-yuanbao',
   factory: (require) => {
     const React = require('react')
     const h = React.createElement
@@ -309,10 +309,10 @@ select.yb-input{font-family:inherit;cursor:pointer;appearance:none;background-im
       inject: ['slots', 'sessions'],
       apply(ctx) {
         const style = document.createElement('style')
-        style.setAttribute('data-plugin-css', 'dsh-yuanbao')
+        style.setAttribute('data-plugin-css', '@anxi78/dsh-yuanbao')
         style.textContent = CSS
         document.head.appendChild(style)
-        ctx.effect(() => () => style.remove(), 'dsh-yuanbao: 设置页样式')
+        ctx.effect(() => () => style.remove(), '@anxi78/dsh-yuanbao: 设置页样式')
 
         const slots = (typeof ctx.get === 'function' ? ctx.get('slots') : undefined) || ctx.slots
         if (!slots) return
