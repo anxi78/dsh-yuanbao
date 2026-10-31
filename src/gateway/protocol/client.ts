@@ -90,7 +90,12 @@ const DEFAULT_RECONNECT_DELAYS = [1_000, 2_000, 5_000, 10_000, 30_000, 60_000];
 const NO_RECONNECT_CLOSE_CODES = new Set([
   4012, // Version ban
   4013, // User ban
-  4014, // Same-user connection conflict
+  // 4014 (same-user connection conflict) 故意不在此列。
+  // 场景：同一个 bot 在多个环境各跑一个实例（比如容器 + 另一台机器），
+  // 后连上的会把先连上的踢掉。如果直接放弃重连，被踢的那个就永久失联，
+  // 用户会看到「bot 死了」。
+  // 允许重连会带来互踢，但至少两边都有机会抢回连接 —— 比单边永久沉默好。
+  // 真正的解法是只跑一个实例，这个由使用方决定。
   4018, // Account ban
   4019, // Account deleted
   4021, // Device removed
