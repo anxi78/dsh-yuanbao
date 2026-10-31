@@ -1,5 +1,7 @@
 # dsh-yuanbao
 
+[![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
+
 [中文](./README.md) | English
 
 A Yuanbao IM channel plugin for [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) (dsh). It connects Yuanbao Open Platform WebSocket messages to the dsh agent runtime.

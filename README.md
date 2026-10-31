@@ -1,5 +1,7 @@
 # dsh-yuanbao
 
+[![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
+
 中文 | [English](./README_EN.md)
 
 基于 [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) (dsh) 的元宝 IM 通道插件，将元宝开放平台 WebSocket 消息接入 dsh agent runtime。
