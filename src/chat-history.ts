@@ -58,6 +58,30 @@ export const chatMediaHistories = new Map<string, MediaHistoryEntry[]>();
 export const chatTextHistories = new Map<string, TextHistoryEntry[]>();
 
 /**
+ * chatKey → 该会话收到的**最后一条消息**的元信息。
+ *
+ * 和 chatTextHistories 的区别：文本历史只记有正文的消息，
+ * 纯图片消息没有正文会被跳过。但「发图后立刻 @bot」需要知道
+ * 上一条消息**到底是什么**（哪怕它没有文字），所以单独记一份。
+ */
+export type LastMessageEntry = {
+  /** 消息 id */
+  messageId?: string;
+  /** 发送者账号（稳定标识，用于判断是不是同一个人） */
+  senderId?: string;
+  /** 发送者昵称 */
+  senderNickname?: string;
+  /** 这条消息携带的媒体类型（image/file/undefined） */
+  mediaKinds: Array<'image' | 'file'>;
+  /** 媒体列表（供自动附图使用） */
+  medias: Array<{ url: string; name?: string; kind?: 'image' | 'file' }>;
+  /** 记录时间 */
+  timestamp: number;
+};
+
+export const chatLastMessage = new Map<string, LastMessageEntry>();
+
+/**
  * 生成会话级缓存键。
  * 群聊用 group:{groupCode}，私聊用 direct:{fromAccount}。
  */
@@ -182,10 +206,57 @@ export function findMediaByMessageId(
   return undefined;
 }
 
+/**
+ * 记录「这个会话收到的最后一条消息」。
+ *
+ * 每条消息都要调（包括没有正文的纯图片消息），
+ * 这样「发图后立刻 @bot」才能判断上一条到底是什么。
+ */
+export function rememberLastMessage(
+  chatKey: string,
+  entry: {
+    messageId?: string;
+    senderId?: string;
+    senderNickname?: string;
+    medias: InboundMedia[];
+  },
+): void {
+  const medias = (entry.medias || [])
+    .filter(m => m.url)
+    .map(m => ({ url: m.url, name: m.name, kind: m.kind }));
+
+  chatLastMessage.set(chatKey, {
+    messageId: entry.messageId,
+    senderId: entry.senderId,
+    senderNickname: entry.senderNickname,
+    mediaKinds: medias.map(m => m.kind).filter((k): k is 'image' | 'file' => Boolean(k)),
+    medias,
+    timestamp: Date.now(),
+  });
+}
+
+/** 取这个会话的最后一条消息（没有则 undefined） */
+export function lastMessage(chatKey: string): LastMessageEntry | undefined {
+  return chatLastMessage.get(chatKey);
+}
+
+/**
+ * 取最近一条媒体记录。
+ *
+ * 用于「发图后立刻 @bot」的自动附图机制：需要判断上一条消息
+ * 是不是同一人发的图片。只看最后一条，不做模糊匹配。
+ */
+export function latestMedia(chatKey: string): MediaHistoryEntry | undefined {
+  const list = chatMediaHistories.get(chatKey);
+  if (!list || list.length === 0) return undefined;
+  return list[list.length - 1];
+}
+
 /** 清空某个会话的全部历史（会话结束时调用） */
 export function clearChatHistory(chatKey: string): void {
   chatMediaHistories.delete(chatKey);
   chatTextHistories.delete(chatKey);
+  chatLastMessage.delete(chatKey);
 }
 
 
