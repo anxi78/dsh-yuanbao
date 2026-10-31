@@ -187,3 +187,106 @@ export function clearChatHistory(chatKey: string): void {
   chatMediaHistories.delete(chatKey);
   chatTextHistories.delete(chatKey);
 }
+
+
+// ---------------------------------------------------------------------------
+// 持久化
+// ---------------------------------------------------------------------------
+// 历史原本只在内存里，DSH 一重启就全没了。
+// 这里落盘到 ~/.dsh/.yuanbao-history.json，启动时读回。
+//
+// 设计取舍：
+//   · 只存文本历史，不存媒体历史 —— 媒体的 url 有签名时效，过期了也用不了
+//   · 写入做防抖，避免每条消息都碰一次磁盘
+//   · 读取失败静默忽略，历史丢失不能阻断插件启动
+
+const HISTORY_FILE = '.yuanbao-history.json';
+
+/** 每个会话最多落盘多少条（比内存上限小，控制文件体积） */
+const PERSIST_MAX_PER_CHAT = 50;
+
+type PersistedShape = {
+  version: 1;
+  chats: Record<string, TextHistoryEntry[]>;
+};
+
+function historyPath(): string {
+  const home = process.env.DSH_HOME
+    || (process.env.HOME ? `${process.env.HOME}/.dsh` : '');
+  if (!home) return '';
+  return `${home}/${HISTORY_FILE}`;
+}
+
+let persistTimer: ReturnType<typeof setTimeout> | undefined;
+let persistPending = false;
+
+/** 把当前文本历史写入磁盘（异步、防抖、失败只警告） */
+async function flushHistory(logger?: { warn: (m: string) => void }): Promise<void> {
+  const file = historyPath();
+  if (!file) return;
+
+  const chats: Record<string, TextHistoryEntry[]> = {};
+  for (const [key, list] of chatTextHistories) {
+    if (list.length === 0) continue;
+    chats[key] = list.slice(-PERSIST_MAX_PER_CHAT);
+  }
+
+  const payload: PersistedShape = { version: 1, chats };
+  try {
+    const { writeFile, mkdir } = await import('node:fs/promises');
+    const { dirname } = await import('node:path');
+    await mkdir(dirname(file), { recursive: true });
+    await writeFile(file, `${JSON.stringify(payload)}\n`, 'utf8');
+  } catch (error) {
+    logger?.warn(`history persist failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/** 安排一次防抖写盘（200ms 内的多次改动合并成一次） */
+export function schedulePersist(logger?: { warn: (m: string) => void }): void {
+  if (!historyPath()) return;
+  persistPending = true;
+  if (persistTimer) return;
+  persistTimer = setTimeout(() => {
+    persistTimer = undefined;
+    if (!persistPending) return;
+    persistPending = false;
+    void flushHistory(logger);
+  }, 200);
+  // 不让定时器拖住进程退出
+  if (typeof persistTimer === 'object' && persistTimer && 'unref' in persistTimer) {
+    (persistTimer as { unref: () => void }).unref();
+  }
+}
+
+/**
+ * 启动时从磁盘恢复文本历史。
+ *
+ * 只恢复最近的条目，过旧的历史带进上下文反而干扰。
+ */
+export async function loadPersistedHistory(
+  logger?: { info: (m: string) => void; warn: (m: string) => void },
+): Promise<void> {
+  const file = historyPath();
+  if (!file) return;
+  try {
+    const { readFile } = await import('node:fs/promises');
+    const raw = await readFile(file, 'utf8');
+    const parsed = JSON.parse(raw) as PersistedShape;
+    if (!parsed || parsed.version !== 1 || !parsed.chats) return;
+
+    let restored = 0;
+    for (const [key, list] of Object.entries(parsed.chats)) {
+      if (!Array.isArray(list) || list.length === 0) continue;
+      chatTextHistories.set(key, list.slice(-TEXT_MAX_PER_CHAT));
+      restored += list.length;
+    }
+    logger?.info(`history restored: ${restored} entries across ${Object.keys(parsed.chats).length} chats`);
+  } catch (error) {
+    // 文件不存在是正常的首次启动
+    const msg = error instanceof Error ? error.message : String(error);
+    if (!msg.includes('ENOENT')) {
+      logger?.warn(`history load failed: ${msg}`);
+    }
+  }
+}

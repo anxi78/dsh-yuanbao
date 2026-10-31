@@ -5,6 +5,7 @@ import { createLog } from './logger.js';
 import { YuanbaoDshBridge } from './bridge.js';
 import { loadLocalEnv, resolveEnvConfig } from './env-loader.js';
 import { createServiceReader } from './services.js';
+import { loadPersistedHistory } from './chat-history.js';
 
 export const name = 'dsh-yuanbao';
 // `tools` is declared so the plugin may register the media-send tool: cordis
@@ -88,6 +89,10 @@ export async function apply(ctx: Context, config: YuanbaoDshConfig): Promise<voi
   if (persisted.appKey) resolvedConfig.appKey = persisted.appKey;
   if (persisted.appSecret) resolvedConfig.appSecret = persisted.appSecret;
   if (persisted.token) resolvedConfig.token = persisted.token;
+
+  // 恢复上次运行留下的群聊历史。
+  // 不恢复的话，每次重启 agent 都会「失忆」——群里的上下文全没了。
+  await loadPersistedHistory(logger);
 
   logger.info(`apply() called; envFiles=${loadedEnvFiles.length}; appKey=${resolvedConfig.appKey ? 'set' : 'missing'}; secret=${resolvedConfig.appSecret ? 'set' : 'missing'}; token=${resolvedConfig.token ? 'set' : 'missing'}; sessionMode=${resolvedConfig.sessionMode ?? 'per-peer'}; pinned=${resolvedConfig.pinnedSessionId || '(none)'}`);
 

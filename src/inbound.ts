@@ -14,7 +14,7 @@ import { createReplyHeartbeatController } from './transport/heartbeat.js';
 import { handleBuiltinCommand } from './commands.js';
 import { buildMediaBlocks, downloadMedia, extractMedias, guessImageMediaType, IMAGE_MEDIA_TYPES, type InboundMedia } from './media.js';
 import { formatQuoteContext, parseQuote, resolveQuoteMedia, type QuoteInfo } from './quote.js';
-import { consumeText, deriveChatKey, recentText, rememberMedia, rememberText, type TextHistoryEntry } from './chat-history.js';
+import { consumeText, deriveChatKey, recentText, rememberMedia, rememberText, schedulePersist, type TextHistoryEntry } from './chat-history.js';
 import type { AttachmentStoreLike } from './media.js';
 
 export async function handleInbound(params: {
@@ -105,6 +105,7 @@ export async function handleInbound(params: {
       senderId: msg.from_account,
       body: stripMention(extracted, config.botId || msg.to_account || sender.getAccount().botId || ''),
     });
+    schedulePersist(logger);
   }
 
   // 诊断：把 cloud_custom_data 原文打出来。
@@ -131,6 +132,7 @@ export async function handleInbound(params: {
           senderId: msg.from_account,
           body: `[引用 ${earlyQuote.sender_nickname ?? earlyQuote.sender_id ?? '某人'} 的消息: ${quoteText}]`,
         });
+        schedulePersist(logger);
         logger.info(`inbound early quote recorded to history: chars=${quoteText.length}`);
       }
     }
@@ -269,6 +271,7 @@ export async function handleInbound(params: {
     // 只清「本次带进去的条数」，期间新到的消息保留。
     if (scope === 'group' && historyLimit > 0 && pendingHistory.length > 0) {
       consumeText(chatKey, pendingHistory.length);
+      schedulePersist(logger);
       logger.info(`inbound history consumed: count=${pendingHistory.length}; chatKey=${chatKey}`);
     }
   });
