@@ -217,9 +217,9 @@ export async function handleInbound(params: {
   // 实际发的是「引用那条图片 + @我 + 一句文字」。
   // 引用信息在消息级的 cloud_custom_data 里，不在 msg_body。
   const quote = parseQuote(msg.cloud_custom_data);
-  const quoteMedia = quote ? resolveQuoteMedia(quote, chatKey) : undefined;
+  const quoteMedias = quote ? resolveQuoteMedia(quote, chatKey) : [];
   if (quote) {
-    logger.info(`inbound quote detected: type=${quote.type ?? '?'}; hasDesc=${Boolean(quote.desc)}; id=${quote.id ?? ''}; mediaResolved=${quoteMedia ? 'yes' : 'no'}`);
+    logger.info(`inbound quote detected: type=${quote.type ?? '?'}; hasDesc=${Boolean(quote.desc)}; id=${quote.id ?? ''}; mediaResolved=${quoteMedias.length}`);
   }
 
   const replyTarget: ReplyTarget = {
@@ -237,7 +237,7 @@ export async function handleInbound(params: {
     return;
   }
 
-  const body = buildAgentBody({ msg, text, scope, mentioned, config, quote, quoteMedia, history: pendingHistory, botIdentity, autoImages });
+  const body = buildAgentBody({ msg, text, scope, mentioned, config, quote, quoteMedias, history: pendingHistory, botIdentity, autoImages });
   if (!body.trim()) {
     logger.warn('inbound dropped: empty agent body');
     return;
@@ -250,7 +250,7 @@ export async function handleInbound(params: {
     // Attach images/files so the agent can actually inspect them. Failures are
     // logged and skipped: losing media must not lose the accompanying text.
     // 诊断：确认附件存储到底有没有注入
-    logger.info(`inbound media diag: hasAttachments=${Boolean(attachments)}; ownBody=${msgBody.length}; hasQuoteMedia=${Boolean(quoteMedia)}`);
+    logger.info(`inbound media diag: hasAttachments=${Boolean(attachments)}; ownBody=${msgBody.length}; quoteMediaCount=${quoteMedias.length}`);
     if (attachments) {
       logger.info(`inbound media diag: store keys=${Object.keys(attachments).join(',')}; hasSaveImage=${typeof (attachments as { saveImage?: unknown }).saveImage}`);
     }
@@ -263,45 +263,48 @@ export async function handleInbound(params: {
     // msg_content.image_info_array 里读 —— 构造一个只有 msg_content.url
     // 的伪元素是匹配不上的（实测 extracted=0）。
     // 引用媒体已经有现成的 url 和 name，直接下载 + 存进附件库即可。
-    if (quoteMedia && attachments) {
-      try {
-        // 入站媒体给的是 hunyuan 的 resourceId 地址，直接 GET 会 401。
-        // 先换成真正的 COS 地址再下载。
-        let effective = quoteMedia;
-        if (quoteMedia.url.includes('resourceId=')) {
-          const resolvedUrl = await sender.resolveDownloadUrl(quoteMedia.url);
-          if (resolvedUrl) {
-            effective = { ...quoteMedia, url: resolvedUrl };
-            logger.info(`inbound quoted media url resolved: name=${quoteMedia.name}`);
-          } else {
-            logger.warn(`inbound quoted media url unresolved, trying raw: name=${quoteMedia.name}`);
+    // 被引用的消息可能带多张图，逐张处理，单张失败不影响其他张
+    if (quoteMedias.length > 0 && attachments) {
+      for (const media of quoteMedias) {
+        try {
+          // 入站媒体给的是 hunyuan 的 resourceId 地址，直接 GET 会 401。
+          // 先换成真正的 COS 地址再下载。
+          let effective = media;
+          if (media.url.includes('resourceId=')) {
+            const resolvedUrl = await sender.resolveDownloadUrl(media.url);
+            if (resolvedUrl) {
+              effective = { ...media, url: resolvedUrl };
+              logger.info(`inbound quoted media url resolved: name=${media.name}`);
+            } else {
+              logger.warn(`inbound quoted media url unresolved, trying raw: name=${media.name}`);
+            }
           }
-        }
-        const downloaded = await downloadMedia(effective, logger);
-        if (downloaded) {
-          const guessed = quoteMedia.kind === 'image' ? guessImageMediaType(quoteMedia.name) : undefined;
-          const mediaType = guessed ?? downloaded.mediaType;
-          if (quoteMedia.kind === 'image' && mediaType && IMAGE_MEDIA_TYPES.has(mediaType)) {
-            const ref = await attachments.saveImage({
-              data: downloaded.data,
-              mediaType,
-              name: quoteMedia.name,
-            });
-            mediaBlocks = mediaBlocks.concat([{ type: 'image', attachment: ref } as unknown as ContentBlock]);
-            logger.info(`inbound quoted media attached as image: name=${quoteMedia.name}; bytes=${downloaded.data.byteLength}`);
+          const downloaded = await downloadMedia(effective, logger);
+          if (downloaded) {
+            const guessed = media.kind === 'image' ? guessImageMediaType(media.name) : undefined;
+            const mediaType = guessed ?? downloaded.mediaType;
+            if (media.kind === 'image' && mediaType && IMAGE_MEDIA_TYPES.has(mediaType)) {
+              const ref = await attachments.saveImage({
+                data: downloaded.data,
+                mediaType,
+                name: media.name,
+              });
+              mediaBlocks = mediaBlocks.concat([{ type: 'image', attachment: ref } as unknown as ContentBlock]);
+              logger.info(`inbound quoted media attached as image: name=${media.name}; bytes=${downloaded.data.byteLength}`);
+            } else {
+              const ref = await attachments.saveFile({
+                data: downloaded.data,
+                name: media.name,
+              });
+              mediaBlocks = mediaBlocks.concat([{ type: 'file', attachment: ref } as unknown as ContentBlock]);
+              logger.info(`inbound quoted media attached as file: name=${media.name}; bytes=${downloaded.data.byteLength}`);
+            }
           } else {
-            const ref = await attachments.saveFile({
-              data: downloaded.data,
-              name: quoteMedia.name,
-            });
-            mediaBlocks = mediaBlocks.concat([{ type: 'file', attachment: ref } as unknown as ContentBlock]);
-            logger.info(`inbound quoted media attached as file: name=${quoteMedia.name}; bytes=${downloaded.data.byteLength}`);
+            logger.warn(`inbound quoted media download failed: name=${media.name}; url=${media.url.slice(0, 100)}`);
           }
-        } else {
-          logger.warn(`inbound quoted media download failed: name=${quoteMedia.name}; url=${quoteMedia.url.slice(0, 100)}`);
+        } catch (error) {
+          logger.warn(`inbound quoted media attach failed: ${media.name}; ${error instanceof Error ? error.message : String(error)}`);
         }
-      } catch (error) {
-        logger.warn(`inbound quoted media attach failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
     // ── 自动附图（发图后立刻 @bot）──
@@ -479,8 +482,8 @@ function buildAgentBody(params: {
   config: YuanbaoDshConfig;
   /** 被引用的消息；有值时会把内容作为上下文附在正文前 */
   quote?: QuoteInfo;
-  /** 引用里回查到的媒体实体（图片/文件） */
-  quoteMedia?: InboundMedia;
+  /** 引用里回查到的媒体实体（可能多个） */
+  quoteMedias?: InboundMedia[];
   /** @bot 之前群里最近的若干条消息（不含当前这条） */
   history?: TextHistoryEntry[];
   /** bot 自己的身份，用于在上下文里标注「你是谁」 */
@@ -488,7 +491,7 @@ function buildAgentBody(params: {
   /** 发图后立刻 @bot 时自动附带的图片（可能多张） */
   autoImages?: InboundMedia[];
 }): string {
-  const { msg, text, scope, mentioned, config, quote, quoteMedia, history, botIdentity, autoImages } = params;
+  const { msg, text, scope, mentioned, config, quote, quoteMedias, history, botIdentity, autoImages } = params;
   const prompt = scope === 'group' ? config.groupPrompt : config.directPrompt;
   const header = scope === 'group'
     ? `[Yuanbao group message from ${msg.sender_nickname ?? msg.from_account ?? 'unknown'} in group ${msg.group_name ?? msg.group_code ?? 'unknown'}${mentioned ? ', mentioned bot' : ''}]`
@@ -517,7 +520,7 @@ function buildAgentBody(params: {
   }
 
   // 引用内容放在正文之前，让 agent 先看到"他在回复哪条消息"
-  const quoteBlock = quote ? formatQuoteContext(quote, quoteMedia) : '';
+  const quoteBlock = quote ? formatQuoteContext(quote, quoteMedias) : '';
 
   // 自动附图时给 agent 一句提示，否则它不知道附件从哪来的
   const autoBlock = autoImages && autoImages.length > 0

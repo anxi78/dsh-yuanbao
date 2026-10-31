@@ -96,26 +96,30 @@ export function parseQuote(cloudCustomData: string | undefined): QuoteInfo | und
 export function resolveQuoteMedia(
   quote: QuoteInfo,
   chatKey: string,
-): InboundMedia | undefined {
+): InboundMedia[] {
   const type = Number(quote.type);
-  if (!isMediaQuoteType(type)) return undefined;
+  if (!isMediaQuoteType(type)) return [];
 
   const entry = findMediaByMessageId(chatKey, quote.id);
-  if (!entry || entry.medias.length === 0) return undefined;
-
-  const first = entry.medias[0];
-  if (!first || !first.url) return undefined;
+  if (!entry || entry.medias.length === 0) return [];
 
   const label = TYPE_LABEL[type] ?? 'media';
   const kind: 'image' | 'file' = type === ImClientMessageType.MT_PIC ? 'image' : 'file';
-  const name = first.name || label;
 
-  return {
-    kind,
-    url: first.url,
-    name,
-    placeholder: `[quoted ${label}: ${name}]`,
-  };
+  // 被引用的那条消息可能带多张图/多个文件，全部返回。
+  // 之前只取 medias[0]，一次发 4 张图再引用，只能拿到第一张。
+  const out: InboundMedia[] = [];
+  for (const m of entry.medias) {
+    if (!m.url) continue;
+    const name = m.name || `${label}-${out.length + 1}`;
+    out.push({
+      kind,
+      url: m.url,
+      name,
+      placeholder: `[quoted ${label}: ${name}]`,
+    });
+  }
+  return out;
 }
 
 /**
@@ -129,7 +133,7 @@ export function resolveQuoteMedia(
  *   > [引用 @某人 的消息]:
  *   >[image]
  */
-export function formatQuoteContext(quote: QuoteInfo, media?: InboundMedia): string {
+export function formatQuoteContext(quote: QuoteInfo, medias?: InboundMedia[]): string {
   let senderPart = '';
   if (quote.sender_nickname) senderPart = ` from ${quote.sender_nickname}`;
   else if (quote.sender_id) senderPart = ` from ${quote.sender_id}`;
@@ -139,9 +143,9 @@ export function formatQuoteContext(quote: QuoteInfo, media?: InboundMedia): stri
   if (!desc) {
     // 媒体引用：desc 本来就是空的。
     // 如果已经按 id 回查到实体，就用真实文件名 —— 否则退回 [image] 这种标签。
-    // （之前只判断 desc，所以即使媒体解析成功，这里仍然只输出 [image]。）
-    if (media) {
-      desc = media.placeholder;
+    if (medias && medias.length > 0) {
+      // 多张时全部列出，不是只显示第一张
+      desc = medias.map(m => m.placeholder).join(' ');
     } else {
       const type = Number(quote.type);
       const label = TYPE_LABEL[type] ?? 'media';
