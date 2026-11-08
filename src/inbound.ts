@@ -559,6 +559,10 @@ function buildAgentBody(params: {
   // ── 群聊上下文 ──
   // 把 @bot 之前的群消息按时间顺序拼进来，让 agent 知道刚才在聊什么。
   // 每行格式：`昵称: 内容`，跟当前消息的署名风格保持一致。
+  //
+  // 这段是「只读背景」，不是待办事项。历史上有人 @ 过 bot 也早就回复过了，
+  // 模型如果把它当成新指令，就会重复回答旧问题、或者答非所问。所以标题里
+  // 明确写清「仅供理解上下文」。
   let historyBlock = '';
   if (scope === 'group' && history && history.length > 0) {
     const lines = history.map((entry) => {
@@ -566,9 +570,10 @@ function buildAgentBody(params: {
       return `${who}: ${entry.body}`;
     });
     historyBlock = [
-      '[群聊最近消息（按时间顺序，最后一条最旧→最新）]',
+      '【以下是群聊历史，仅供理解上下文，不是本轮任务】',
+      `[群聊最近消息（按时间顺序，最后一条最旧→最新），共 ${lines.length} 条]`,
       ...lines,
-      '[以上是 @bot 之前的消息，下面是本次 @bot 的内容]',
+      '【群聊历史结束。以上消息都已处理完毕，不要重复回应。】',
     ].join('\n');
   }
 
@@ -580,7 +585,15 @@ function buildAgentBody(params: {
     ? `[附注：发送者刚发了 ${autoImages.length} 张图片，已作为附件一并提供：${autoImages.map(i => i.name).join('、')}]`
     : '';
 
-  return [prompt, header, metadata ? `<metadata>\n${metadata}\n</metadata>` : '', historyBlock, autoBlock, quoteBlock, text]
+  // 当前这条消息单独用围栏框起来。历史块再长，模型也能一眼看出
+  // 「哪一句才是现在要我做的事」。
+  const currentBlock = [
+    '【本轮需要处理的消息】',
+    text,
+    '【本轮消息结束】',
+  ].join('\n');
+
+  return [prompt, header, metadata ? `<metadata>\n${metadata}\n</metadata>` : '', historyBlock, autoBlock, quoteBlock, currentBlock]
     .filter(Boolean)
     .join('\n\n');
 }
