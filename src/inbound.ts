@@ -17,6 +17,46 @@ import { formatQuoteContext, parseQuote, resolveQuoteMedia, type QuoteInfo } fro
 import { consumeText, deriveChatKey, lastMessage, recentText, rememberLastMessage, rememberMedia, rememberText, schedulePersist, type TextHistoryEntry } from './chat-history.js';
 import type { AttachmentStoreLike } from './media.js';
 
+/**
+ * 每个群里「我这个 bot 叫什么」的缓存。
+ *
+ * 群成员列表里带着每个成员的 nick_name，用 bot id 一查就知道自己在群里的
+ * 显示名。这份名单不常变，没必要每条消息都拉一次 —— 进程内缓存，DSH 重启
+ * 自然清空重查。
+ *
+ * key = groupCode, value = 已解析到的显示名（空串表示查过了但没查到）
+ */
+const botDisplayNameCache = new Map<string, string>();
+
+/**
+ * 反查 bot 在指定群里的显示名。
+ *
+ * 拿不到就返回空串（不抛错）：显示名只是给 agent 认自己用的，缺了不影响
+ * 收发消息，不该让整条消息处理失败。
+ */
+async function resolveBotDisplayName(
+  sender: YuanbaoSender,
+  groupCode: string | undefined,
+  botId: string,
+  logger: Logger,
+): Promise<string> {
+  if (!groupCode || !botId) return '';
+  const cached = botDisplayNameCache.get(groupCode);
+  if (cached !== undefined) return cached;
+
+  const members = await sender.listGroupMembers(groupCode);
+  const self = members.find(m => m.userId === botId);
+  const name = self?.nickName?.trim() ?? '';
+  // 查不到也写进缓存（空串），避免每条消息都重试同一个失败的请求。
+  botDisplayNameCache.set(groupCode, name);
+  if (name) {
+    logger.info(`bot display name resolved: group=${groupCode}; bot=${botId}; name=${name}`);
+  } else {
+    logger.warn(`bot display name not found in member list: group=${groupCode}; bot=${botId}; members=${members.length}`);
+  }
+  return name;
+}
+
 export async function handleInbound(params: {
   msg: YuanbaoInboundMessage;
   isGroup: boolean;
@@ -237,7 +277,13 @@ export async function handleInbound(params: {
     return;
   }
 
-  const body = buildAgentBody({ msg, text, scope, mentioned, config, quote, quoteMedias, history: pendingHistory, botIdentity, autoImages });
+  // 群聊里 agent 需要知道自己叫什么。名字从群成员列表按 bot id 反查，
+  // 每个群只查一次（进程内缓存，DSH 重启后重查）。
+  const botDisplayName = scope === 'group'
+    ? await resolveBotDisplayName(sender, msg.group_code, botIdentity, logger)
+    : '';
+
+  const body = buildAgentBody({ msg, text, scope, mentioned, config, quote, quoteMedias, history: pendingHistory, botIdentity, botDisplayName, autoImages });
   if (!body.trim()) {
     logger.warn('inbound dropped: empty agent body');
     return;
@@ -488,19 +534,26 @@ function buildAgentBody(params: {
   history?: TextHistoryEntry[];
   /** bot 自己的身份，用于在上下文里标注「你是谁」 */
   botIdentity?: string;
+  /** bot 在群里的显示名（由群成员列表反查得到，可能为空） */
+  botDisplayName?: string;
   /** 发图后立刻 @bot 时自动附带的图片（可能多张） */
   autoImages?: InboundMedia[];
 }): string {
-  const { msg, text, scope, mentioned, config, quote, quoteMedias, history, botIdentity, autoImages } = params;
+  const { msg, text, scope, mentioned, config, quote, quoteMedias, history, botIdentity, botDisplayName, autoImages } = params;
   const prompt = scope === 'group' ? config.groupPrompt : config.directPrompt;
   const header = scope === 'group'
     ? `[Yuanbao group message from ${msg.sender_nickname ?? msg.from_account ?? 'unknown'} in group ${msg.group_name ?? msg.group_code ?? 'unknown'}${mentioned ? ', mentioned bot' : ''}]`
     : `[Yuanbao direct message from ${msg.sender_nickname ?? msg.from_account ?? 'unknown'}]`;
 
+  // 把「我叫什么」写清楚：只有 id 的话 agent 认不出自己，容易把自己当成别人。
+  const identity = botDisplayName
+    ? `${botDisplayName} (${botIdentity})`
+    : botIdentity;
+
   const metadata = [
     msg.msg_id ? `message_id: ${msg.msg_id}` : '',
     msg.trace_id ? `trace_id: ${msg.trace_id}` : '',
-    scope === 'group' && botIdentity ? `you_are: ${botIdentity}` : '',
+    scope === 'group' && identity ? `you_are: ${identity}` : '',
   ].filter(Boolean).join('\n');
 
   // ── 群聊上下文 ──
