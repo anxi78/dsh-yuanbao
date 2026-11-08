@@ -301,6 +301,11 @@ select.yb-input{font-family:inherit;cursor:pointer;appearance:none;background-im
           h('div', { className: 'yb-tip', style: { marginTop: '14px' } },
             '安全说明：密钥只存在本机设置文件里，接口不会回显明文。',
           ),
+
+          h('div', { className: 'yb-actions' },
+            h('button', { className: 'yb-btn', onClick: save, disabled: saving }, saving ? '保存中…' : '保存凭据'),
+            msg ? h('span', { className: 'yb-msg ' + msg.kind }, msg.text) : null,
+          ),
         ),
       )
     }
